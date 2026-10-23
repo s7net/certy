@@ -230,9 +230,13 @@ cf_ready() { # zone
 
 cf_table() {
   local -a rows=("#|Name|Token|Zones|Added")
-  local f i=0 tok
+  local f i=0 tok zones
   for f in $(cf_files); do
     i=$((i + 1)); tok="$(cf_field "$f" TOKEN)"
+    # Tokens moved from older versions have no zone list yet.
+    if [ -z "$(cf_field "$f" ZONES)" ] && CF_TOKEN_FILE="$f" && zones="$(cf zones 2>/dev/null)"; then
+      sed -i.bak "s/^ZONES=.*/ZONES=$zones/" "$f" && rm -f "$f.bak"
+    fi
     rows+=("$i|$(cf_field "$f" NAME)|****${tok: -4}|$(cf_field "$f" ZONES)|$(cf_field "$f" ADDED)")
   done
   table "${rows[@]}"
@@ -278,19 +282,22 @@ cmd_cloudflare() {
       out "No Cloudflare tokens saved yet."
       name="$(ask "Name for the token [default]: " default)"
       cf_save_token "$CF_DIR/$(date +%s)$RANDOM" "$name" || return 0
+      out ""
       continue
     fi
     cf_table
     out "  1) Add a token"
     out "  2) Edit a token"
     out "  3) Delete a token"
-    case "$(ask "Choose (Enter to exit): ")" in
+    out "  0) Back"
+    case "$(ask "Choose [0]: " 0)" in
       1) name="$(ask "Name for the token: " "token-$(date +%m%d)")"
          cf_save_token "$CF_DIR/$(date +%s)$RANDOM" "$name" || true ;;
       2) f="$(cf_pick "Token # to edit: ")" || continue
          out "  1) Rename"
          out "  2) Replace the token"
-         case "$(ask "Choose: ")" in
+         out "  0) Back"
+         case "$(ask "Choose [0]: " 0)" in
            1) name="$(ask "New name: ")"
               [ -n "$name" ] && sed -i.bak "s/^NAME=.*/NAME=$(printf '%s' "$name" | sed 's/[\/&]/\\&/g')/" "$f" && rm -f "$f.bak" && ok "Renamed" ;;
            2) cf_save_token "$f" "$(cf_field "$f" NAME)" || true ;;
@@ -738,7 +745,7 @@ cmd_list() {
   while read -r n; do [ -n "$n" ] && names+=("$n"); done <<EOF_NAMES
 $(cert_names)
 EOF_NAMES
-  [ ${#names[@]} -gt 0 ] || { out "No certificates yet. Run: certy"; return 1; }
+  [ ${#names[@]} -gt 0 ] || { out "No certificates yet."; return 1; }
   for n in "${names[@]}"; do
     i=$((i + 1)); exp="$(cert_expiry "$n")"
     rows+=("$i|$n|$(cert_domains "$n")|${exp%% *}|${exp##* }")
@@ -811,43 +818,50 @@ wizard() {
 }
 
 manage() {
-  local -a names=()
-  local n sel act
-  cmd_list || return 0
-  while read -r n; do [ -n "$n" ] && names+=("$n"); done <<EOF_NAMES
+  local -a names
+  local n sel
+  while :; do
+    names=()
+    cmd_list || return 0
+    while read -r n; do [ -n "$n" ] && names+=("$n"); done <<EOF_NAMES
 $(cert_names)
 EOF_NAMES
-  sel="$(ask "Select # (Enter to exit): ")"
-  [ -n "$sel" ] || return 0
-  case "$sel" in *[!0-9]*) die "Invalid choice" ;; esac
-  [ "$sel" -ge 1 ] && [ "$sel" -le ${#names[@]} ] || die "Invalid choice"
-  n="${names[$((sel - 1))]}"
-  out "${B}$n${N}"
-  out "  1) Renew now"
-  out "  2) Install on cPanel"
-  out "  3) Show files"
-  out "  4) Delete"
-  act="$(ask "Choose (Enter to exit): ")"
-  case "$act" in
-    1) certbot_quiet renew --non-interactive --cert-name "$n" --force-renewal && ok "Renewed $n" || die "Renew failed" ;;
-    2) cmd_install "$n" ;;
-    3) cmd_show "$n" ;;
-    4) [ "$(ask "Delete $n? Type yes to confirm: ")" = yes ] && cmd_delete "$n" ;;
-    *) ;;
-  esac
+    sel="$(ask "Select # (0 = back): " 0)"
+    case "$sel" in 0) return 0 ;; *[!0-9]*) continue ;; esac
+    [ "$sel" -ge 1 ] && [ "$sel" -le ${#names[@]} ] || continue
+    n="${names[$((sel - 1))]}"
+    out "${B}$n${N}"
+    out "  1) Renew now"
+    out "  2) Install on cPanel"
+    out "  3) Show files"
+    out "  4) Delete"
+    out "  0) Back"
+    case "$(ask "Choose [0]: " 0)" in
+      1) if certbot_quiet renew --non-interactive --cert-name "$n" --force-renewal; then ok "Renewed $n"; else warn "Renew failed"; fi ;;
+      2) cmd_install "$n" || true ;;
+      3) cmd_show "$n" ;;
+      4) [ "$(ask "Delete $n? Type yes to confirm: ")" = yes ] && { cmd_delete "$n" || true; } ;;
+    esac
+    out ""
+  done
 }
 
 interactive() {
   { : </dev/tty; } 2>/dev/null || { usage; exit 0; }
   banner
-  out "  1) New SSL"
-  out "  2) Manage SSLs"
-  out "  3) Cloudflare tokens"
-  case "$(ask "Choose [1]: " 1)" in
-    2) manage ;;
-    3) cmd_cloudflare ;;
-    *) out ""; wizard ;;
-  esac
+  while :; do
+    out "  1) New SSL"
+    out "  2) Manage SSLs"
+    out "  3) Cloudflare tokens"
+    out "  0) Exit"
+    case "$(ask "Choose [1]: " 1)" in
+      0|q|Q) return 0 ;;
+      2) out ""; manage ;;
+      3) out ""; cmd_cloudflare ;;
+      *) out ""; wizard; return ;;
+    esac
+    out ""
+  done
 }
 
 case "${1:-}" in
