@@ -73,9 +73,10 @@ if [ -z "$MODE" ]; then
   if [ "$(id -u)" = 0 ]; then
     MODE=root
   elif { : </dev/tty; } 2>/dev/null; then
-    printf '%s' "Do you have root access and want certbot installed system-wide? [y/N] " >/dev/tty
+    printf '%s\n' "Install mode:" "  1) User - into ~/bin, no root needed" "  2) System - certbot from the OS package manager (root)" >/dev/tty
+    printf '%s' "Choose [1]: " >/dev/tty
     read -r ans </dev/tty || ans=""
-    case "$ans" in y|Y|yes|YES) MODE=root ;; esac
+    [ "$ans" = 2 ] && MODE=root
   fi
 fi
 

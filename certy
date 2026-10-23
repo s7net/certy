@@ -292,7 +292,7 @@ wait_for_done() {
     ans="$(printf '%s' "$ans" | tr 'a-z' 'A-Z' | tr -d '[:space:]')"
     case "$ans" in
       DONE) ;;
-      ABORT|EXIT|QUIT) touch "$STATE_DIR/aborted"; die "Cancelled" ;;
+      ABORT|EXIT|QUIT) touch "$STATE_DIR/aborted"; exit 1 ;;
       *) continue ;;
     esac
     if all_visible "$f"; then
@@ -329,6 +329,18 @@ hook_auth() {
     ok "DNS record added in cPanel"
     wait_for_dns "$f"
   fi
+}
+
+# Removes TXT records we added in cPanel when certbot didn't get to it.
+remove_leftovers() {
+  local f="$STATE_DIR/records" name value method
+  rm -f "$STATE_DIR/aborted"
+  [ -f "$f" ] || return 0
+  while IFS=$'\t' read -r name value method; do
+    [ "$method" = cpanel ] && cpanel txt-del "$name" "$value" >/dev/null 2>&1
+  done <"$f"
+  rm -f "$f"
+  return 0
 }
 
 hook_cleanup() {
@@ -472,10 +484,17 @@ cmd_issue() {
   [ "$staging" = 1 ] && args+=(--staging)
   [ "$force" = 1 ] && args+=(--force-renewal)
 
+  # Ctrl+C also hits certbot; keep its traceback out of sight.
+  trap 'touch "$STATE_DIR/aborted"' INT
   if ! certbot_quiet "${args[@]}"; then
-    [ -f "$STATE_DIR/aborted" ] && { rm -f "$STATE_DIR/aborted"; exit 1; }
+    trap '' INT
+    if [ -f "$STATE_DIR/aborted" ]; then
+      remove_leftovers
+      out ""; die "Cancelled"
+    fi
     die "Failed. Full log: $LOGS_DIR/letsencrypt.log"
   fi
+  trap - INT
 
   local exp; exp="$(cert_expiry "$name")"
   ok "SSL ready for ${B}$name${N} (expires ${exp%% *})"
