@@ -18,7 +18,8 @@ LOGS_DIR="$CERTY_HOME/logs"
 STATE_DIR="$CERTY_HOME/state"
 SETTINGS="$CERTY_HOME/settings"
 DNS_TIMEOUT="${CERTY_DNS_TIMEOUT:-300}"
-CF_TOKEN_FILE="$CERTY_HOME/cloudflare.token"
+CF_DIR="$CERTY_HOME/cloudflare"   # one file per saved API token
+CF_TOKEN_FILE=""                   # the token file in use
 # Pre-filled "create API token" page with only the DNS edit permission.
 CF_TOKEN_URL='https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=%2A&zoneId=all&name=certy'
 
@@ -50,7 +51,7 @@ ${B}certy${N} $CERTY_VERSION - free SSL for cPanel (Let's Encrypt, DNS validatio
   certy list                     list certificates
   certy renew [NAME]             renew due certificates (cron does this daily)
   certy show|install|delete NAME show files / install on cPanel / delete
-  certy cloudflare [remove]      connect (or disconnect) a Cloudflare API token
+  certy cloudflare               manage Cloudflare API tokens (add / edit / delete)
   certy update                   update certy and certbot
 
 Options: -d DOMAIN (repeat or comma separated)  -w|--wildcard  -e EMAIL
@@ -163,7 +164,7 @@ else { die "unknown helper command $cmd\n" }
 # never shows up in `ps` on a shared host.
 cf() {
   local tok hdr rc=0
-  tok="$(cat "$CF_TOKEN_FILE" 2>/dev/null)" && [ -n "$tok" ] || return 1
+  tok="$(sed -n 's/^TOKEN=//p' "$CF_TOKEN_FILE" 2>/dev/null)" && [ -n "$tok" ] || return 1
   mkdir -p "$CERTY_HOME/tmp"
   hdr="$CERTY_HOME/tmp/cf.$$"
   (umask 077; printf 'header = "Authorization: Bearer %s"\n' "$tok" >"$hdr")
@@ -188,6 +189,7 @@ sub zone_id {
 }
 my $cmd = shift // "";
 if ($cmd eq "check") { $ARGV[0] ? zone_id($ARGV[0]) : call("GET", "/zones?per_page=1"); }
+elsif ($cmd eq "zones") { print join(" ", map { $_->{name} } @{ call("GET", "/zones?per_page=50") }), "\n"; }
 elsif ($cmd eq "add") {
   my ($name, $value, $zone) = @ARGV; my $zid = zone_id($zone);
   my $r = call("POST", "/zones/$zid/dns_records", { type => "TXT", name => $name, content => $value, ttl => 60 });
@@ -200,34 +202,106 @@ else { die "unknown cloudflare command $cmd\n" }
   return $rc
 }
 
-# Reads a token from the terminal, checks it can reach the zone, saves it.
-cf_read_token() { # [zone] -> 0 saved, 1 skipped
-  local zone="${1:-}" tok i
+# Token files: NAME=, ADDED=, ZONES=, TOKEN= lines, readable only by the user.
+cf_files() {
+  # Move a token saved by older versions into the new layout.
+  if [ -s "$CERTY_HOME/cloudflare.token" ]; then
+    mkdir -p "$CF_DIR"
+    (umask 077; printf 'NAME=default\nADDED=%s\nZONES=\nTOKEN=%s\n' "$(date +%F)" \
+      "$(cat "$CERTY_HOME/cloudflare.token")" >"$CF_DIR/default")
+    rm -f "$CERTY_HOME/cloudflare.token"
+  fi
+  local f
+  for f in "$CF_DIR"/*; do [ -f "$f" ] && echo "$f"; done
+  return 0
+}
+cf_field() { sed -n "s/^$2=//p" "$1" 2>/dev/null; }
+
+# Selects a saved token that can edit the zone (sets CF_TOKEN_FILE).
+cf_ready() { # zone
+  local f
+  for f in $(cf_files); do
+    CF_TOKEN_FILE="$f"
+    cf check "$1" 2>/dev/null && return 0
+  done
+  CF_TOKEN_FILE=""
+  return 1
+}
+
+cf_table() {
+  local -a rows=("#|Name|Token|Zones|Added")
+  local f i=0 tok
+  for f in $(cf_files); do
+    i=$((i + 1)); tok="$(cf_field "$f" TOKEN)"
+    rows+=("$i|$(cf_field "$f" NAME)|****${tok: -4}|$(cf_field "$f" ZONES)|$(cf_field "$f" ADDED)")
+  done
+  table "${rows[@]}"
+}
+
+# Asks for a token, checks it and saves it to file $1 (new or existing).
+cf_save_token() { # file name
+  local f="$1" name="$2" tok zones i
+  out "Create a token with DNS edit permission: ${C}$CF_TOKEN_URL${N}"
   for i in 1 2 3; do
-    printf '%s' "Cloudflare API token (Enter to skip): " >/dev/tty
-    read -rs tok </dev/tty || tok=""
-    out ""
+    printf '%s' "API token: " >/dev/tty
+    read -rs tok </dev/tty || tok=""; out ""
     [ -n "$tok" ] || return 1
-    mkdir -p "$CERTY_HOME"
-    (umask 077; printf '%s' "$tok" >"$CF_TOKEN_FILE")
-    if cf check "$zone" 2>/dev/null; then
-      ok "Cloudflare token saved"
+    mkdir -p "$CF_DIR"
+    (umask 077; printf 'TOKEN=%s\n' "$tok" >"$f.tmp")
+    CF_TOKEN_FILE="$f.tmp"
+    if zones="$(cf zones 2>/dev/null)"; then
+      (umask 077; printf 'NAME=%s\nADDED=%s\nZONES=%s\nTOKEN=%s\n' "$name" "$(date +%F)" "$zones" "$tok" >"$f")
+      rm -f "$f.tmp"
+      ok "Saved $name (zones: ${zones:-none})"
       return 0
     fi
-    rm -f "$CF_TOKEN_FILE"
-    warn "This token can't access ${zone:-any zone}. Needs Zone > DNS > Edit."
+    rm -f "$f.tmp"
+    warn "Token not valid. Try again (Enter to cancel)."
   done
   return 1
 }
 
-cf_connect() { # [zone]
-  { : </dev/tty; } 2>/dev/null || return 1
-  out "Create one with DNS edit permission: ${C}$CF_TOKEN_URL${N}"
-  cf_read_token "${1:-}"
+cf_pick() { # prompt -> token file
+  local n files
+  files=($(cf_files))
+  n="$(ask "$1")"
+  case "$n" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$n" -ge 1 ] && [ "$n" -le ${#files[@]} ] || return 1
+  echo "${files[$((n - 1))]}"
 }
 
-# True when a saved Cloudflare token can edit the zone.
-cf_ready() { [ -s "$CF_TOKEN_FILE" ] && cf check "$1" 2>/dev/null; }
+cmd_cloudflare() {
+  { : </dev/tty; } 2>/dev/null || die "Needs an interactive terminal"
+  local f name
+  while :; do
+    if [ -z "$(cf_files)" ]; then
+      out "No Cloudflare tokens saved yet."
+      name="$(ask "Name for the token [default]: " default)"
+      cf_save_token "$CF_DIR/$(date +%s)$RANDOM" "$name" || return 0
+      continue
+    fi
+    cf_table
+    out "  1) Add a token"
+    out "  2) Edit a token"
+    out "  3) Delete a token"
+    case "$(ask "Choose (Enter to exit): ")" in
+      1) name="$(ask "Name for the token: " "token-$(date +%m%d)")"
+         cf_save_token "$CF_DIR/$(date +%s)$RANDOM" "$name" || true ;;
+      2) f="$(cf_pick "Token # to edit: ")" || continue
+         out "  1) Rename"
+         out "  2) Replace the token"
+         case "$(ask "Choose: ")" in
+           1) name="$(ask "New name: ")"
+              [ -n "$name" ] && sed -i.bak "s/^NAME=.*/NAME=$(printf '%s' "$name" | sed 's/[\/&]/\\&/g')/" "$f" && rm -f "$f.bak" && ok "Renamed" ;;
+           2) cf_save_token "$f" "$(cf_field "$f" NAME)" || true ;;
+         esac ;;
+      3) f="$(cf_pick "Token # to delete: ")" || continue
+         [ "$(ask "Delete $(cf_field "$f" NAME)? Type yes: ")" = yes ] && rm -f "$f" && ok "Deleted" ;;
+      *) return 0 ;;
+    esac
+    out ""
+  done
+}
 
 # ---------------------------------------------------------------- DNS table
 # Draws a box table. Arguments: "col1|col2|..." rows; the first row is the header.
@@ -434,7 +508,8 @@ hook_auth() {
         cf-ok:*)
           zone="${method#cf-ok:}"; method=manual
           if [ "$a" = y ]; then
-            if id="$(cf add "$name" "$value" "$zone" 2>&1)"; then method="cloudflare:$id"; else warn "$id"; fi
+            cf_ready "$zone" &&
+            if id="$(cf add "$name" "$value" "$zone" 2>&1)"; then method="cloudflare:$(basename "$CF_TOKEN_FILE"):$id"; else warn "$id"; fi
           fi ;;
       esac
       printf '%s\t%s\t%s\n' "$name" "$value" "$method" >>"$tmp"
@@ -456,7 +531,10 @@ hook_auth() {
 remove_record() { # name value method
   case "$3" in
     cpanel) cpanel txt-del "$1" "$2" >/dev/null 2>&1 ;;
-    cloudflare:*) local ids="${3#cloudflare:}"; cf del "${ids%%:*}" "${ids#*:}" >/dev/null 2>&1 ;;
+    cloudflare:*)
+      local ids="${3#cloudflare:}"
+      CF_TOKEN_FILE="$CF_DIR/${ids%%:*}"; ids="${ids#*:}"
+      cf del "${ids%%:*}" "${ids#*:}" >/dev/null 2>&1 ;;
   esac
   return 0
 }
@@ -762,11 +840,12 @@ EOF_NAMES
 interactive() {
   { : </dev/tty; } 2>/dev/null || { usage; exit 0; }
   banner
-  if [ -z "$(cert_names)" ]; then wizard; return; fi
   out "  1) New SSL"
   out "  2) Manage SSLs"
+  out "  3) Cloudflare tokens"
   case "$(ask "Choose [1]: " 1)" in
     2) manage ;;
+    3) cmd_cloudflare ;;
     *) out ""; wizard ;;
   esac
 }
@@ -784,9 +863,7 @@ case "${1:-}" in
   cron) install_cron; ok "Auto-renew enabled" ;;
   uninstall-cron) crontab -l 2>/dev/null | grep -vF "$SELF\" renew" | crontab - ; ok "Auto-renew disabled" ;;
   update) cmd_update ;;
-  cloudflare)
-    if [ "${2:-}" = remove ]; then rm -f "$CF_TOKEN_FILE"; ok "Cloudflare disconnected"
-    else cf_connect || die "Cloudflare not connected"; fi ;;
+  cloudflare|cf) cmd_cloudflare ;;
   __hook-auth) hook_auth ;;
   __hook-cleanup) hook_cleanup ;;
   __hook-deploy) hook_deploy ;;
