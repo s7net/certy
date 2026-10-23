@@ -32,7 +32,11 @@ ok()   { echo "${G}✔${N} $*"; }
 warn() { echo "${Y}!${N} $*"; }
 die()  { echo "${R}✘ $*${N}" >&2; exit 1; }
 
-RAW="https://raw.githubusercontent.com/$REPO/main"
+# raw.githubusercontent.com caches branches for ~5 minutes; pin to the
+# current commit so fresh pushes are picked up immediately.
+REF="$(curl -fsSL "https://api.github.com/repos/$REPO/commits/main" 2>/dev/null |
+  sed -n 's/^  "sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n1)"
+RAW="https://raw.githubusercontent.com/$REPO/${REF:-main}"
 if [ "$VERSION" = latest ]; then
   REL="https://github.com/$REPO/releases/latest/download"
 else

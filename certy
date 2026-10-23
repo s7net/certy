@@ -401,7 +401,11 @@ cmd_renew() {
 
 cmd_update() {
   info "Updating certy from github.com/$CERTY_REPO"
-  curl -fsSL "https://raw.githubusercontent.com/$CERTY_REPO/main/install.sh" | bash
+  local ref mode=--user
+  [ "$SELF" = /usr/local/bin/certy ] && mode=--root
+  ref="$(curl -fsSL "https://api.github.com/repos/$CERTY_REPO/commits/main" 2>/dev/null |
+    sed -n 's/^  "sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n1)"
+  curl -fsSL "https://raw.githubusercontent.com/$CERTY_REPO/${ref:-main}/install.sh" | bash -s -- "$mode"
 }
 
 case "${1:-}" in
