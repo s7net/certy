@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# certy - free SSL (Let's Encrypt) for cPanel accounts, powered by certbot.
+# certy - free SSL (Let's Encrypt) for any Linux server or cPanel account,
+# root or not (works in a cPanel jailed shell), powered by certbot.
 #
 #   certy -d example.com --wildcard
 #   certy -d example.com -d www.example.com -d shop.example.com
@@ -9,7 +10,7 @@
 # prints them in a table and waits for you to add them.
 set -euo pipefail
 
-CERTY_VERSION="1.1.0"
+CERTY_VERSION="1.2.0"
 CERTY_REPO="${CERTY_REPO:-s7net/certy}"
 CERTY_HOME="${CERTY_HOME:-$HOME/.certy}"
 CONFIG_DIR="$CERTY_HOME/config"
@@ -47,7 +48,7 @@ die()  { out "${R}✘ $*${N}"; exit 1; }
 
 usage() {
   cat <<EOF
-${B}certy${N} $CERTY_VERSION - free SSL for cPanel (Let's Encrypt, DNS validation)
+${B}certy${N} $CERTY_VERSION - free SSL with Let's Encrypt (DNS validation)
 
   certy                          interactive: new SSL or manage existing
   certy -d example.com [-w]      issue (-w adds *.example.com)
@@ -800,7 +801,7 @@ banner() {
   out "  / __/ _ \\ '__| __| | | |"
   out " | (_|  __/ |  | |_| |_| |"
   out "  \\___\\___|_|   \\__|\\__, |"
-  out "                    |___/${N}  ${B}free SSL for cPanel${N} v$CERTY_VERSION"
+  out "                    |___/${N}  ${B}free SSL, anywhere${N} v$CERTY_VERSION"
   out ""
 }
 

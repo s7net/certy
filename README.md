@@ -1,23 +1,24 @@
-<p align="center"><img src="assets/banner.svg" alt="certy - free SSL for cPanel in one command" width="100%"></p>
+<p align="center"><img src="assets/banner.svg" alt="certy - free SSL in one command" width="100%"></p>
 
 # certy
 
-Free SSL certificates (Let's Encrypt) on cPanel hosting with a single command — powered by `certbot`.
+Free SSL certificates (Let's Encrypt) with a single command — on any Linux server, with or without root, including cPanel accounts with only a jailed shell. Powered by `certbot`.
 
 ```bash
 certy -d example.com --wildcard
 ```
 
-- **No root required**: everything is installed into `~/bin` and `~/.certy`.
+- **Runs anywhere**: VPS or dedicated server (root or not) and shared cPanel hosting, even in a jailed shell.
+- **No root required**: everything is installed into `~/bin` and `~/.certy`; with root, certbot can come from the OS package manager.
 - **Bundled certbot**: a standalone certbot binary is built with GitHub Actions and published in Releases (no Python needed).
-- **Always DNS validation (DNS-01)**: TXT records are added and removed automatically through cPanel's `uapi`, and shown in a clean table.
+- **Always DNS validation (DNS-01)**: TXT records are added and removed automatically (cPanel `uapi` or Cloudflare API) and shown in a clean table.
 - **Cloudflare**: save one or more Cloudflare API tokens with `certy cloudflare`; for domains on Cloudflare certy shows the record and asks whether to add it automatically or by hand.
-- **Manual fallback**: if the zone isn't hosted on this cPanel (e.g. Cloudflare), certy prints the records, waits for you to type `DONE`, checks DNS itself and tells you which record is still missing.
-- **Automatic install into cPanel** and **automatic renewal** via cron.
+- **Manual fallback**: for any other DNS provider, certy prints the records, waits for you to type `DONE`, checks DNS itself and tells you which record is still missing.
+- **Automatic renewal** via cron, and **automatic install** into cPanel when it runs there.
 
 ## Install
 
-On your cPanel host (Terminal or SSH):
+On your server or cPanel host (SSH or cPanel Terminal):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/s7net/certy/main/install.sh | bash
@@ -42,7 +43,7 @@ $ certy
   / __/ _ \ '__| __| | | |
  | (_|  __/ |  | |_| |_| |
   \___\___|_|   \__|\__, |
-                    |___/  free SSL for cPanel
+                    |___/  free SSL, anywhere
 
 Domain: example.com
 Include wildcard (*.example.com)? [y/N]: y
