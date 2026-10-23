@@ -226,25 +226,8 @@ cf_connect() { # [zone]
   cf_read_token "${1:-}"
 }
 
-# Decides whether to change the zone's DNS through Cloudflare (once per run).
-cf_ready() { # zone
-  local a
-  [ -f "$STATE_DIR/cf-yes" ] && return 0
-  [ -f "$STATE_DIR/cf-skip" ] && return 1
-  if [ -s "$CF_TOKEN_FILE" ] && cf check "$1" 2>/dev/null; then
-    # Renewals from cron can't answer; the saved token is the consent.
-    { : </dev/tty; } 2>/dev/null || return 0
-    printf '%s' "${B}$1${N} is on Cloudflare. Add the TXT record there automatically? [Y/n]: " >/dev/tty
-    read -r a </dev/tty || a=n
-    case "$a" in n|N|no|NO) touch "$STATE_DIR/cf-skip"; return 1 ;; esac
-    touch "$STATE_DIR/cf-yes"; return 0
-  fi
-  { : </dev/tty; } 2>/dev/null || return 1
-  out "${B}$1${N} is on Cloudflare. Give certy an API token to set the record automatically."
-  if cf_connect "$1"; then touch "$STATE_DIR/cf-yes"; return 0; fi
-  touch "$STATE_DIR/cf-skip"
-  return 1
-}
+# True when a saved Cloudflare token can edit the zone.
+cf_ready() { [ -s "$CF_TOKEN_FILE" ] && cf check "$1" 2>/dev/null; }
 
 # ---------------------------------------------------------------- DNS table
 # Draws a box table. Arguments: "col1|col2|..." rows; the first row is the header.
@@ -409,37 +392,58 @@ wait_for_done() {
 # ---------------------------------------------------------------- hooks
 # Certbot calls these with CERTBOT_DOMAIN / CERTBOT_VALIDATION set.
 hook_auth() {
-  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" value="$CERTBOT_VALIDATION"
-  local f="$STATE_DIR/records" mode method=manual info zone id
-  mode="$(cat "$STATE_DIR/mode" 2>/dev/null || echo auto)"
+  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records"
   mkdir -p "$STATE_DIR"
-  # Go by the zone's real (public) nameservers: Cloudflare's API if it's on
-  # Cloudflare, cPanel only if cPanel actually serves the zone, else manual.
-  if [ "$mode" = auto ]; then
-    info="$(zone_info "$name")"; zone="${info%% *}"
-    case "$info" in
-      *.cloudflare.com.*)
-        if cf_ready "$zone"; then
-          if id="$(cf add "$name" "$value" "$zone" 2>&1)"; then
-            method="cloudflare:$id"
-          else
-            warn "$id"
-          fi
-        fi ;;
-      *)
-        if has_uapi && cpanel_serves "$name" "${info#* }" &&
-           cpanel txt-add "$name" "$value" >/dev/null 2>&1; then
-          method=cpanel
-        fi ;;
-    esac
-  fi
-  printf '%s\t%s\t%s\n' "$name" "$value" "$method" >>"$f"
-
+  printf '%s\t%s\t%s\n' "$name" "$CERTBOT_VALIDATION" pending >>"$f"
   # Certbot runs the hook once per challenge; act once all are queued.
   [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] || return 0
-  if grep -q $'\tmanual$' "$f"; then
-    out "Add this TXT record to your DNS:"
+
+  local mode value method info zone id cfz="" tmp="$f.new" a
+  mode="$(cat "$STATE_DIR/mode" 2>/dev/null || echo auto)"
+  # Decide per record by the zone's real nameservers: cPanel is used silently
+  # when it serves the zone; Cloudflare (with a saved token) after asking.
+  : >"$tmp"
+  while IFS=$'\t' read -r name value method; do
+    method=manual
+    if [ "$mode" = auto ]; then
+      info="$(zone_info "$name")"; zone="${info%% *}"
+      case "$info" in
+        *.cloudflare.com.*) cf_ready "$zone" && { method="cf-ok:$zone"; cfz="$zone"; } ;;
+        *) has_uapi && cpanel_serves "$name" "${info#* }" &&
+             cpanel txt-add "$name" "$value" >/dev/null 2>&1 && method=cpanel ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\n' "$name" "$value" "$method" >>"$tmp"
+  done <"$f"
+  mv "$tmp" "$f"
+
+  if [ -n "$cfz" ]; then
+    out "TXT record for ${B}$cfz${N}:"
     print_records "$f"
+    a=y
+    if { : </dev/tty; } 2>/dev/null; then
+      out "  1) Add it automatically via Cloudflare"
+      out "  2) I'll add it myself"
+      printf '%s' "Choose [1]: " >/dev/tty
+      read -r a </dev/tty || a=2
+      [ "${a:-1}" = 1 ] && a=y
+    fi
+    : >"$tmp"
+    while IFS=$'\t' read -r name value method; do
+      case "$method" in
+        cf-ok:*)
+          zone="${method#cf-ok:}"; method=manual
+          if [ "$a" = y ]; then
+            if id="$(cf add "$name" "$value" "$zone" 2>&1)"; then method="cloudflare:$id"; else warn "$id"; fi
+          fi ;;
+      esac
+      printf '%s\t%s\t%s\n' "$name" "$value" "$method" >>"$tmp"
+    done <"$f"
+    mv "$tmp" "$f"
+  fi
+
+  if grep -q $'\tmanual$' "$f"; then
+    [ -n "$cfz" ] || { out "Add this TXT record to your DNS:"; print_records "$f"; }
     print_dns_hosts "$f"
     wait_for_done "$f"
   else
