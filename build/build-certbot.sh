@@ -4,13 +4,17 @@
 #   docker run --rm -v "$PWD:/io" quay.io/pypa/manylinux2014_x86_64 /io/build/build-certbot.sh
 set -euo pipefail
 
-PY=/opt/python/cp312-cp312/bin/python
 ARCH="$(uname -m)"
+# manylinux's own Pythons are static; PyInstaller needs a shared libpython,
+# so use python-build-standalone (also built against glibc 2.17).
+PBS_TAG="${PBS_TAG:-20261021}"
+PBS_PY="${PBS_PY:-3.12.15}"
 OUT=/io/dist
 CERTBOT_VERSION="${CERTBOT_VERSION:-}"
 
 cd /tmp
-"$PY" -m venv venv
+curl -fsSL "https://github.com/astral-sh/python-build-standalone/releases/download/$PBS_TAG/cpython-$PBS_PY%2B$PBS_TAG-$ARCH-unknown-linux-gnu-install_only.tar.gz" | tar xz
+python/bin/python3 -m venv venv
 venv/bin/pip install -q --upgrade pip
 venv/bin/pip install -q "certbot${CERTBOT_VERSION:+==$CERTBOT_VERSION}" pyinstaller
 
