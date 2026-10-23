@@ -191,14 +191,54 @@ table() {
   hline "└" "┴" "┘"
 }
 
-# Nameservers that are authoritative for a name (walks up to the zone apex).
-auth_servers() {
+# NS records of a name (empty unless it's a zone apex). dig first, DoH if
+# dig is missing or port 53 is blocked.
+ns_of() {
+  local out
+  if command -v dig >/dev/null 2>&1 && out="$(dig +time=3 +tries=1 +short NS "$1" 2>/dev/null)"; then
+    printf '%s\n' "$out" | grep '\.$' || true
+    return
+  fi
+  curl -fsS -m 10 "https://dns.google/resolve?name=$1&type=NS" 2>/dev/null |
+    grep -o '"type": *2,"TTL": *[0-9]*,"data": *"[^"]*"' | sed -e 's/.*"data": *"//' -e 's/"$//' || true
+}
+
+# Prints "<zone> <ns> <ns>..." for the zone a name lives in.
+zone_info() {
   local d="$1" ns
   while [ "${d#*.}" != "$d" ]; do
-    ns="$(dig +time=3 +tries=1 +short NS "$d" 2>/dev/null | grep '\.$' || true)"
-    [ -n "$ns" ] && { echo "$ns"; return; }
+    ns="$(ns_of "$d")"
+    [ -n "$ns" ] && { echo "$d" $ns; return; }
     d="${d#*.}"
   done
+}
+
+# Nameservers that are authoritative for a name.
+auth_servers() { zone_info "$1" | cut -d' ' -f2-; }
+
+# Shows where each zone's DNS is hosted, with a direct link for Cloudflare.
+print_dns_hosts() {
+  local f="$1" name value method info zone ns provider link seen=" " links=""
+  local -a rows=("Zone|Nameservers|Provider|Add records at")
+  while IFS=$'\t' read -r name value method; do
+    [ "$method" = manual ] || continue
+    info="$(zone_info "$name")"
+    [ -n "$info" ] || continue
+    zone="${info%% *}"; ns="${info#* }"
+    case "$seen" in *" $zone "*) continue ;; esac
+    seen="$seen$zone "
+    case "$ns" in
+      *.cloudflare.com.*)
+        provider="Cloudflare"
+        link="https://dash.cloudflare.com/?to=/:account/$zone/dns/records"
+        links="$links$link"$'\n' ;;
+      *) provider="other"; link="your DNS provider's panel" ;;
+    esac
+    rows+=("$zone|$(printf '%s\n' $ns | sort | head -n 2 | sed 's/\.$//' | paste -sd, - | sed 's/,/, /g')|$provider|$link")
+  done <"$f"
+  [ ${#rows[@]} -gt 1 ] && { table "${rows[@]}"; out ""; }
+  [ -n "$links" ] && { out "Open Cloudflare DNS:"; out "${links%$'\n'}"; out ""; }
+  return 0
 }
 
 # Returns 0 when the TXT value is published. Asks the authoritative
@@ -305,6 +345,7 @@ hook_auth() {
   if grep -q $'\tmanual$' "$f"; then
     info "Add these DNS records at your DNS provider:"
     print_records "$f"
+    print_dns_hosts "$f"
     wait_for_done "$f"
   else
     info "DNS records added to cPanel:"
