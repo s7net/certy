@@ -30,52 +30,73 @@ If neither `--root` nor `--user` is given, the installer asks.
 
 ## Usage
 
+Just run `certy` - it asks for the domain, wildcard and verification type:
+
+```
+$ certy
+                 _
+   ___ ___ _ __| |_ _   _
+  / __/ _ \ '__| __| | | |
+ | (_|  __/ |  | |_| |_| |
+  \___\___|_|   \__|\__, |
+                    |___/  free SSL for cPanel
+
+Domain: example.com
+Include wildcard (*.example.com)? [y/N]: y
+Verification:  1) Automatic (cPanel DNS)   2) Manual (I add the DNS record)
+Choose [1]: 1
+
+Requesting SSL for example.com *.example.com
+✔ DNS record added in cPanel
+Waiting for DNS...
+✔ SSL ready for example.com (expires 2027-01-21)
+✔ Installed on cPanel: example.com, shop.example.com
+```
+
+With manual verification (or when the zone isn't on this cPanel) certy shows the record, a direct Cloudflare link if the domain uses Cloudflare, and waits for `DONE`:
+
+```
+Add this TXT record to your DNS:
+┌─────────────────────────────┬──────┬─────────────────────────────────────────────┐
+│ Name                        │ Type │ Value                                       │
+├─────────────────────────────┼──────┼─────────────────────────────────────────────┤
+│ _acme-challenge.example.com │ TXT  │ _zV17C9bJwIfgxVRd5E52ppayU_I1eoDj-obXR1HKDA │
+└─────────────────────────────┴──────┴─────────────────────────────────────────────┘
+Cloudflare: https://dash.cloudflare.com/?to=/:account/example.com/dns/records
+Type DONE when the record is set (ABORT to cancel):
+```
+
+Or without questions:
+
 ```bash
-# Domain + wildcard (*.example.com)
 certy -d example.com --wildcard
-
-# Multiple domains, no wildcard
-certy -d example.com -d www.example.com -d shop.example.com
-certy -d example.com,www.example.com
-
-# With an email for expiry notices
-certy -d example.com -e me@example.com
-
-# Force manual DNS: print the records, wait for DONE, verify, continue
-certy -d example.com --wildcard --manual
+certy -d example.com,www.example.com --manual
 ```
 
-Sample output:
+### Managing certificates
 
-```
-┌───┬──────────────────────────────┬──────┬─────┬─────────────────────────────────────────────┬────────┐
-│ # │ Name                         │ Type │ TTL │ Value                                       │ Status │
-├───┼──────────────────────────────┼──────┼─────┼─────────────────────────────────────────────┼────────┤
-│ 1 │ _acme-challenge.example.com  │ TXT  │ 60  │ uOp7TmC-K4q0b3MHPLYs8e_awkEMTDmr0D8-pVMuir4 │ added  │
-│ 2 │ _acme-challenge.example.com  │ TXT  │ 60  │ i1Ny4Oqr3at3FcgHzkVsqi_d4GBhKsuWADs-zs4V2-o │ added  │
-└───┴──────────────────────────────┴──────┴─────┴─────────────────────────────────────────────┴────────┘
-```
+Running `certy` when certificates exist offers **Manage SSLs**: pick one to renew, re-install on cPanel, show its files or delete it. The same actions as commands:
 
 | Command | Description |
 |---|---|
-| `certy renew` | Renew all certificates (a daily cron job is added automatically) |
-| `certy list` | List certificates |
-| `certy cron` / `certy uninstall-cron` | Add / remove the renewal cron job |
-| `certy update` | Update certy and certbot |
+| `certy list` | Certificates with domains, expiry date and days left |
+| `certy renew [NAME]` | Renew due certificates (runs daily from cron automatically) |
+| `certy install NAME` | Install a certificate on its cPanel domains |
+| `certy show NAME` | Show certificate file paths |
+| `certy delete NAME` | Delete a certificate |
+| `certy update` | Update certy and certbot (with download progress) |
 
 | Option | Description |
 |---|---|
 | `-d, --domain` | Domain to include (repeatable or comma separated) |
 | `-w, --wildcard` | Also include `*.domain` for each domain |
 | `-e, --email` | Let's Encrypt account email (remembered) |
-| `--manual` | Don't touch DNS; print the records, wait for `DONE` and verify |
+| `--manual` | Add the DNS record yourself; certy waits for `DONE` and verifies |
 | `--no-install` | Don't install the certificate into cPanel |
 | `--staging` | Use the Let's Encrypt staging server |
 | `--force` | Re-issue even if the current certificate is still valid |
 
-Certificates are stored in `~/.certy/config/live/<domain>/` (`fullchain.pem`, `privkey.pem`, …).
-
-`CERTY_DNS_TIMEOUT` (default 300 seconds) sets the maximum wait for DNS propagation.
+Certificates are stored in `~/.certy/config/live/<name>/`. `CERTY_DNS_TIMEOUT` (default 300s) is the maximum wait for automatic DNS records.
 
 ## Building the certbot binary
 

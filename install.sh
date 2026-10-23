@@ -50,6 +50,23 @@ fetch() { # url dest
   else die "curl or wget is required"; fi
 }
 
+# Same as fetch, with a progress bar showing the percentage.
+fetch_progress() { # url dest
+  if command -v curl >/dev/null 2>&1; then curl -fL --retry 3 --progress-bar -o "$2" "$1"
+  elif command -v wget >/dev/null 2>&1; then wget -q --show-progress --progress=bar:force -O "$2" "$1" 2>&1
+  else die "curl or wget is required"; fi
+}
+
+cat <<EOF
+${C}                 _
+   ___ ___ _ __| |_ _   _
+  / __/ _ \\ '__| __| | | |
+ | (_|  __/ |  | |_| |_| |
+  \\___\\___|_|   \\__|\\__, |
+                    |___/${N}  ${B}installer${N}
+
+EOF
+
 # Ask about root access when the user didn't say (works under curl | bash).
 if [ -z "$MODE" ]; then
   MODE=user
@@ -65,7 +82,7 @@ fi
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/certy.XXXXXX" 2>/dev/null || { mkdir -p "$HOME/.certy/tmp"; mktemp -d "$HOME/.certy/tmp/inst.XXXXXX"; })"
 trap 'rm -rf "$TMP"' EXIT
 
-info "Downloading certy from github.com/$REPO"
+info "Downloading certy"
 fetch "$RAW/certy" "$TMP/certy" || die "Could not download certy"
 chmod +x "$TMP/certy"
 
@@ -118,7 +135,7 @@ install_venv() { # fallback when the prebuilt binary can't run here
   rm -rf "$CERTY_HOME/venv"
   "$py" -m venv "$CERTY_HOME/venv" &&
     "$CERTY_HOME/venv/bin/pip" install -q --upgrade pip &&
-    "$CERTY_HOME/venv/bin/pip" install -q certbot || return 1
+    "$CERTY_HOME/venv/bin/pip" install --progress-bar on -q certbot || return 1
   printf '#!/bin/sh\nexec "%s" "$@"\n' "$CERTY_HOME/venv/bin/certbot" >"$BIN/certbot"
   chmod +x "$BIN/certbot"
 }
@@ -135,34 +152,47 @@ install_user() {
     *) arch="" ;;
   esac
 
-  local got=0
+  local got=0 tag=""
   if [ "$(uname -s)" = Linux ] && [ -n "$arch" ]; then
-    info "Downloading certbot binary (linux-$arch)"
-    if fetch "$REL/certbot-linux-$arch.tar.gz" "$TMP/certbot.tar.gz"; then
-      rm -rf "$CERTY_HOME/certbot.new"
-      mkdir -p "$CERTY_HOME/certbot.new"
-      tar -xzf "$TMP/certbot.tar.gz" -C "$CERTY_HOME/certbot.new" --strip-components=1
-      if TMPDIR="$CERTY_HOME/tmp" "$CERTY_HOME/certbot.new/certbot" --version >/dev/null 2>&1; then
-        rm -rf "$CERTY_HOME/certbot"
-        mv "$CERTY_HOME/certbot.new" "$CERTY_HOME/certbot"
-        printf '#!/bin/sh\nexec "%s" "$@"\n' "$CERTY_HOME/certbot/certbot" >"$BIN/certbot"
-        chmod +x "$BIN/certbot"
-        got=1
-      else
-        rm -rf "$CERTY_HOME/certbot.new"
-        warn "Prebuilt binary doesn't run on this system"
-      fi
+    # Skip the download when the installed binary is from the same release.
+    if [ "$VERSION" = latest ]; then
+      tag="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null |
+        sed -n 's/^  "tag_name": "\([^"]*\)".*/\1/p' | head -n1)"
     else
-      warn "Could not download prebuilt certbot"
+      tag="$VERSION"
+    fi
+    if [ -n "$tag" ] && [ "$(cat "$CERTY_HOME/certbot/.release" 2>/dev/null)" = "$tag" ] &&
+       TMPDIR="$CERTY_HOME/tmp" "$CERTY_HOME/certbot/certbot" --version >/dev/null 2>&1; then
+      got=1
+    else
+      info "Downloading certbot (linux-$arch)"
+      if fetch_progress "$REL/certbot-linux-$arch.tar.gz" "$TMP/certbot.tar.gz"; then
+        rm -rf "$CERTY_HOME/certbot.new"
+        mkdir -p "$CERTY_HOME/certbot.new"
+        tar -xzf "$TMP/certbot.tar.gz" -C "$CERTY_HOME/certbot.new" --strip-components=1
+        if TMPDIR="$CERTY_HOME/tmp" "$CERTY_HOME/certbot.new/certbot" --version >/dev/null 2>&1; then
+          [ -n "$tag" ] && echo "$tag" >"$CERTY_HOME/certbot.new/.release"
+          rm -rf "$CERTY_HOME/certbot"
+          mv "$CERTY_HOME/certbot.new" "$CERTY_HOME/certbot"
+          got=1
+        else
+          rm -rf "$CERTY_HOME/certbot.new"
+          warn "Prebuilt binary doesn't run on this system"
+        fi
+      else
+        warn "Could not download prebuilt certbot"
+      fi
+    fi
+    if [ "$got" = 1 ]; then
+      printf '#!/bin/sh\nexec "%s" "$@"\n' "$CERTY_HOME/certbot/certbot" >"$BIN/certbot"
+      chmod +x "$BIN/certbot"
     fi
   fi
   if [ "$got" = 0 ]; then
     install_venv || die "Could not install certbot (no working binary and no Python >= 3.9)"
   fi
-  ok "certbot: $("$BIN/certbot" --version 2>&1)"
-
   install -m 755 "$TMP/certy" "$BIN/certy"
-  ok "certy installed to $BIN/certy"
+  ok "$("$BIN/certy" version 2>/dev/null | paste -sd' ' -) -> $BIN"
 
   case ":$PATH:" in
     *":$BIN:"*) ;;
@@ -180,5 +210,4 @@ install_user() {
 if [ "$MODE" = root ]; then install_root; else install_user; fi
 
 echo
-echo "${B}Done!${N} Try:"
-echo "  certy -d example.com --wildcard"
+echo "${B}Done!${N} Run ${B}certy${N} to get started."

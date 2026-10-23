@@ -9,7 +9,7 @@
 # prints them in a table and waits for you to add them.
 set -euo pipefail
 
-CERTY_VERSION="1.0.0"
+CERTY_VERSION="1.1.0"
 CERTY_REPO="${CERTY_REPO:-s7net/certy}"
 CERTY_HOME="${CERTY_HOME:-$HOME/.certy}"
 CONFIG_DIR="$CERTY_HOME/config"
@@ -39,28 +39,17 @@ die()  { out "${R}✘ $*${N}"; exit 1; }
 
 usage() {
   cat <<EOF
-${B}certy${N} $CERTY_VERSION - Let's Encrypt SSL for cPanel via certbot (DNS validation)
+${B}certy${N} $CERTY_VERSION - free SSL for cPanel (Let's Encrypt, DNS validation)
 
-${B}Usage${N}
-  certy -d DOMAIN [-d DOMAIN ...] [options]
-  certy renew | list | cron | uninstall-cron | update | version
+  certy                          interactive: new SSL or manage existing
+  certy -d example.com [-w]      issue (-w adds *.example.com)
+  certy list                     list certificates
+  certy renew [NAME]             renew due certificates (cron does this daily)
+  certy show|install|delete NAME show files / install on cPanel / delete
+  certy update                   update certy and certbot
 
-${B}Options${N}
-  -d, --domain DOMAIN   Domain to include (repeatable, or comma separated)
-  -w, --wildcard        Also include *.DOMAIN for every domain given
-  -e, --email EMAIL     Account email for expiry notices (remembered)
-      --manual          Don't touch DNS; print the records and wait for you
-      --no-install      Don't install the certificate into cPanel
-      --staging         Use the Let's Encrypt staging server (for testing)
-      --force           Re-issue even if the current cert is still valid
-  -h, --help            Show this help
-
-${B}Examples${N}
-  certy -d example.com --wildcard
-  certy -d example.com,www.example.com -e me@example.com
-  certy renew
-
-Files live in $CERTY_HOME (certificates: $CONFIG_DIR/live/<name>/).
+Options: -d DOMAIN (repeat or comma separated)  -w|--wildcard  -e EMAIL
+         --manual (add DNS record yourself)  --no-install  --staging  --force
 EOF
 }
 
@@ -216,10 +205,9 @@ zone_info() {
 # Nameservers that are authoritative for a name.
 auth_servers() { zone_info "$1" | cut -d' ' -f2-; }
 
-# Shows where each zone's DNS is hosted, with a direct link for Cloudflare.
+# Shows where the zone's DNS is hosted (one line), with a Cloudflare link.
 print_dns_hosts() {
-  local f="$1" name value method info zone ns provider link seen=" " links=""
-  local -a rows=("Zone|Nameservers|Provider|Add records at")
+  local f="$1" name value method info zone ns seen=" "
   while IFS=$'\t' read -r name value method; do
     [ "$method" = manual ] || continue
     info="$(zone_info "$name")"
@@ -228,16 +216,10 @@ print_dns_hosts() {
     case "$seen" in *" $zone "*) continue ;; esac
     seen="$seen$zone "
     case "$ns" in
-      *.cloudflare.com.*)
-        provider="Cloudflare"
-        link="https://dash.cloudflare.com/?to=/:account/$zone/dns/records"
-        links="$links$link"$'\n' ;;
-      *) provider="other"; link="your DNS provider's panel" ;;
+      *.cloudflare.com.*) out "Cloudflare: ${C}https://dash.cloudflare.com/?to=/:account/$zone/dns/records${N}" ;;
+      *) out "DNS for $zone is at: $(printf '%s\n' $ns | sort | head -n 2 | sed 's/\.$//' | paste -sd, - | sed 's/,/, /g')" ;;
     esac
-    rows+=("$zone|$(printf '%s\n' $ns | sort | head -n 2 | sed 's/\.$//' | paste -sd, - | sed 's/,/, /g')|$provider|$link")
   done <"$f"
-  [ ${#rows[@]} -gt 1 ] && { table "${rows[@]}"; out ""; }
-  [ -n "$links" ] && { out "Open Cloudflare DNS:"; out "${links%$'\n'}"; out ""; }
   return 0
 }
 
@@ -265,17 +247,18 @@ txt_visible() {
 # Records file: one "name<TAB>value<TAB>method" line per challenge, where
 # method is "cpanel" (added through uapi) or "manual" (user adds it).
 print_records() {
-  local f="$1" check="${2:-}" n=0 name value method status
-  local -a rows=("#|Name|Type|TTL|Value|Status")
+  local f="$1" check="${2:-}" name value method status
+  local -a rows
+  if [ -n "$check" ]; then rows=("Name|Type|Value|Status"); else rows=("Name|Type|Value"); fi
   while IFS=$'\t' read -r name value method; do
-    n=$((n + 1))
     if [ -n "$check" ]; then
       if txt_visible "$name" "$value"; then status="OK"; else status="NOT FOUND"; fi
-    elif [ "$method" = cpanel ]; then status="added via cPanel"
-    else status="ADD MANUALLY"; fi
-    rows+=("$n|$name|TXT|60|$value|$status")
+      rows+=("$name|TXT|$value|$status")
+    else
+      rows+=("$name|TXT|$value")
+    fi
   done <"$f"
-  out ""; table "${rows[@]}"; out ""
+  table "${rows[@]}"
 }
 
 all_visible() {
@@ -288,16 +271,14 @@ all_visible() {
 # Automatic records: poll until they are published or we time out.
 wait_for_dns() {
   local f="$1" deadline=$(( $(date +%s) + DNS_TIMEOUT ))
-  info "Waiting for DNS propagation (up to ${DNS_TIMEOUT}s)..."
+  out "Waiting for DNS..."
   until all_visible "$f"; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      warn "Some records are not visible yet; trying anyway"
-      print_records "$f" check
+      warn "DNS not visible yet; trying anyway"
       return
     fi
     sleep 10
   done
-  ok "All TXT records are published"
   sleep 5
 }
 
@@ -306,24 +287,21 @@ wait_for_done() {
   local f="$1" ans
   { : </dev/tty; } 2>/dev/null || die "Manual DNS needs an interactive terminal"
   while :; do
-    out "Set the records above, then type ${B}DONE${N} (or ${B}ABORT${N} to cancel):"
-    printf '> ' >/dev/tty
+    printf '%s' "Type ${B}DONE${N} when the record is set (ABORT to cancel): " >/dev/tty
     read -r ans </dev/tty || die "Aborted"
     ans="$(printf '%s' "$ans" | tr 'a-z' 'A-Z' | tr -d '[:space:]')"
     case "$ans" in
       DONE) ;;
-      ABORT|EXIT|QUIT) die "Aborted" ;;
+      ABORT|EXIT|QUIT) touch "$STATE_DIR/aborted"; die "Cancelled" ;;
       *) continue ;;
     esac
-    info "Checking DNS..."
     if all_visible "$f"; then
-      print_records "$f" check
-      ok "All TXT records found - continuing"
+      ok "DNS record found"
       sleep 5
       return
     fi
     print_records "$f" check
-    warn "Some records were not found yet. Check the name/value (DNS can take a few minutes), then type DONE again."
+    warn "Not found yet - check the name/value or wait a minute, then type DONE again."
   done
 }
 
@@ -343,13 +321,12 @@ hook_auth() {
   # Certbot runs the hook once per challenge; act once all are queued.
   [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] || return 0
   if grep -q $'\tmanual$' "$f"; then
-    info "Add these DNS records at your DNS provider:"
+    out "Add this TXT record to your DNS:"
     print_records "$f"
     print_dns_hosts "$f"
     wait_for_done "$f"
   else
-    info "DNS records added to cPanel:"
-    print_records "$f"
+    ok "DNS record added in cPanel"
     wait_for_dns "$f"
   fi
 }
@@ -357,26 +334,23 @@ hook_auth() {
 hook_cleanup() {
   local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records"
   if grep -qF "$name"$'\t'"$CERTBOT_VALIDATION"$'\tcpanel' "$f" 2>/dev/null; then
-    cpanel txt-del "$name" "$CERTBOT_VALIDATION" >/dev/null 2>&1 || warn "Could not remove TXT record $name"
+    cpanel txt-del "$name" "$CERTBOT_VALIDATION" >/dev/null 2>&1 || true
   fi
-  if [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ]; then
-    grep -q $'\tmanual$' "$f" 2>/dev/null && out "You can now delete the _acme-challenge TXT records from your DNS."
-    rm -f "$f"
-  fi
+  [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] && rm -f "$f"
   return 0
 }
 
 # Install a lineage into every cPanel domain it covers.
 install_cert() {
-  local lineage="$1" domains="$2" d n=0 c
-  has_uapi || { warn "uapi not found; skipping cPanel install"; return 0; }
+  local lineage="$1" domains="$2" d c installed=""
+  has_uapi || return 0
   [ -f "$lineage/cert.pem" ] || return 0
   while read -r d; do
     [ -n "$d" ] || continue
     for c in $domains; do
       if [ "$c" = "$d" ] || { [ "${c#\*.}" != "$c" ] && [ "${d#*.}" = "${c#\*.}" ]; }; then
         if cpanel install "$d" "$lineage/cert.pem" "$lineage/privkey.pem" "$lineage/chain.pem" 2>/dev/null; then
-          ok "Installed on $d"; n=$((n + 1))
+          installed="$installed${installed:+, }$d"
         else
           warn "Could not install on $d"
         fi
@@ -386,7 +360,8 @@ install_cert() {
   done <<EOF_DOMAINS
 $(cpanel domains)
 EOF_DOMAINS
-  [ "$n" -gt 0 ] || warn "No matching cPanel domain found to install the certificate on"
+  [ -n "$installed" ] && ok "Installed on cPanel: $installed"
+  return 0
 }
 
 hook_deploy() {
@@ -394,13 +369,49 @@ hook_deploy() {
   install_cert "$RENEWED_LINEAGE" "$RENEWED_DOMAINS"
 }
 
+# ---------------------------------------------------------------- certificates
+cert_names() {
+  local d
+  for d in "$CONFIG_DIR"/live/*/; do
+    [ -f "$d/cert.pem" ] && basename "$d"
+  done
+  return 0
+}
+
+cert_domains() {
+  openssl x509 -in "$CONFIG_DIR/live/$1/cert.pem" -noout -text 2>/dev/null |
+    grep -o 'DNS:[^,[:space:]]*' | sed 's/^DNS://' | paste -sd' ' -
+}
+
+# Prints "YYYY-MM-DD <days left>" for a certificate.
+cert_expiry() {
+  local end
+  end="$(openssl x509 -in "$CONFIG_DIR/live/$1/cert.pem" -noout -enddate 2>/dev/null | sed 's/^notAfter=//; s/ GMT$//')"
+  perl -MTime::Piece -e '
+    my $t = Time::Piece->strptime($ARGV[0], "%b %d %H:%M:%S %Y");
+    printf "%s %d\n", $t->ymd, int(($t->epoch - time) / 86400);' "$end" 2>/dev/null || echo "? ?"
+}
+
+# Runs certbot with its chatter hidden; shows only the useful part on failure.
+certbot_quiet() {
+  local log="$CERTY_HOME/tmp/last-run.log"
+  mkdir -p "$CERTY_HOME/tmp"
+  if run_certbot "$@" >"$log" 2>&1; then return 0; fi
+  [ -f "$STATE_DIR/aborted" ] && return 1
+  if grep -q 'Detail:' "$log"; then
+    grep 'Detail:' "$log" | sed 's/^[[:space:]]*Detail:[[:space:]]*//' | awk '!seen[$0]++'
+  else
+    grep -vE '^(Saving debug log|Ask for help|See the logfile)|^[[:space:]]*$' "$log" | head -n 8
+  fi | while IFS= read -r l; do out "  $l"; done
+  return 1
+}
+
 # ---------------------------------------------------------------- commands
 install_cron() {
-  command -v crontab >/dev/null 2>&1 || { warn "crontab not available; run 'certy renew' periodically"; return; }
+  command -v crontab >/dev/null 2>&1 || return 0
   local line="$((RANDOM % 60)) 3 * * * \"$SELF\" renew >>\"$LOGS_DIR/cron.log\" 2>&1"
-  if crontab -l 2>/dev/null | grep -qF "$SELF\" renew"; then return; fi
-  { crontab -l 2>/dev/null; echo "$line"; } | crontab -
-  ok "Daily auto-renew added to crontab"
+  crontab -l 2>/dev/null | grep -qF "$SELF\" renew" && return 0
+  { crontab -l 2>/dev/null; echo "$line"; } | crontab - 2>/dev/null || true
 }
 
 cmd_issue() {
@@ -408,8 +419,8 @@ cmd_issue() {
   local wildcard=0 email="" manual=0 no_install=0 staging=0 force=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      -d|--domain) [ $# -ge 2 ] || die "$1 needs a value"; IFS=',' read -r -a _d <<<"$2"; domains+=("${_d[@]}"); shift ;;
-      --domain=*) IFS=',' read -r -a _d <<<"${1#*=}"; domains+=("${_d[@]}") ;;
+      -d|--domain) [ $# -ge 2 ] || die "$1 needs a value"; IFS=', ' read -r -a _d <<<"$2"; domains+=("${_d[@]}"); shift ;;
+      --domain=*) IFS=', ' read -r -a _d <<<"${1#*=}"; domains+=("${_d[@]}") ;;
       -w|--wildcard) wildcard=1 ;;
       -e|--email) [ $# -ge 2 ] || die "$1 needs a value"; email="$2"; shift ;;
       --email=*) email="${1#*=}" ;;
@@ -418,7 +429,7 @@ cmd_issue() {
       --staging) staging=1 ;;
       --force) force=1 ;;
       -h|--help) usage; exit 0 ;;
-      *) die "Unknown option: $1 (see certy --help)" ;;
+      *) die "Unknown option: $1 (see certy help)" ;;
     esac
     shift
   done
@@ -436,24 +447,19 @@ cmd_issue() {
   for d in "${list[@]}"; do
     case " ${uniq[*]:-} " in *" $d "*) ;; *) uniq+=("$d") ;; esac
   done
+  [ ${#uniq[@]} -gt 0 ] || die "No valid domain given"
 
   mkdir -p "$CERTY_HOME" "$STATE_DIR"
   [ -n "$email" ] && echo "EMAIL=$email" >"$SETTINGS"
   [ -z "$email" ] && [ -f "$SETTINGS" ] && email="$(sed -n 's/^EMAIL=//p' "$SETTINGS")"
 
-  if [ "$manual" = 0 ] && ! has_uapi; then
-    warn "cPanel 'uapi' not found; switching to manual DNS mode"
-    manual=1
-  fi
+  has_uapi || manual=1
   [ "$manual" = 1 ] && echo manual >"$STATE_DIR/mode" || echo auto >"$STATE_DIR/mode"
   [ "$no_install" = 1 ] && touch "$STATE_DIR/no-install" || rm -f "$STATE_DIR/no-install"
-  rm -f "$STATE_DIR/records"
+  rm -f "$STATE_DIR/records" "$STATE_DIR/aborted"
 
   local name="${uniq[0]#\*.}"
-  info "Requesting certificate ${B}$name${N}"
-  local -a rows=("Domain|Validation")
-  for d in "${uniq[@]}"; do rows+=("$d|DNS-01 (_acme-challenge.${d#\*.})"); done
-  table "${rows[@]}"
+  out "Requesting SSL for ${B}${uniq[*]}${N}"
 
   local -a args=(certonly --non-interactive --agree-tos --cert-name "$name"
     --manual --preferred-challenges dns
@@ -466,28 +472,65 @@ cmd_issue() {
   [ "$staging" = 1 ] && args+=(--staging)
   [ "$force" = 1 ] && args+=(--force-renewal)
 
-  run_certbot "${args[@]}" || die "certbot failed. Log: $LOGS_DIR/letsencrypt.log"
+  if ! certbot_quiet "${args[@]}"; then
+    [ -f "$STATE_DIR/aborted" ] && { rm -f "$STATE_DIR/aborted"; exit 1; }
+    die "Failed. Full log: $LOGS_DIR/letsencrypt.log"
+  fi
 
-  local live="$CONFIG_DIR/live/$name"
-  out ""
-  ok "Certificate ready"
-  table "File|Path" \
-    "Certificate|$live/cert.pem" \
-    "Full chain|$live/fullchain.pem" \
-    "Private key|$live/privkey.pem" \
-    "CA bundle|$live/chain.pem"
-  [ "$manual" = 1 ] || install_cron
+  local exp; exp="$(cert_expiry "$name")"
+  ok "SSL ready for ${B}$name${N} (expires ${exp%% *})"
+  out "   Files: $CONFIG_DIR/live/$name/"
+  install_cron
 }
 
 cmd_renew() {
   rm -f "$STATE_DIR/records"
   # Each renewal keeps the hooks it was issued with; mode defaults to auto.
   [ -f "$STATE_DIR/mode" ] || echo auto >"$STATE_DIR/mode"
+  if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+    local n="$1"; shift
+    set -- --cert-name "$n" "$@"
+  fi
   run_certbot renew --non-interactive "$@"
 }
 
+cmd_list() {
+  local -a rows=("#|Name|Domains|Expires|Days left") names=()
+  local n i=0 exp
+  while read -r n; do [ -n "$n" ] && names+=("$n"); done <<EOF_NAMES
+$(cert_names)
+EOF_NAMES
+  [ ${#names[@]} -gt 0 ] || { out "No certificates yet. Run: certy"; return 1; }
+  for n in "${names[@]}"; do
+    i=$((i + 1)); exp="$(cert_expiry "$n")"
+    rows+=("$i|$n|$(cert_domains "$n")|${exp%% *}|${exp##* }")
+  done
+  table "${rows[@]}"
+}
+
+cmd_show() {
+  local live="$CONFIG_DIR/live/$1"
+  [ -f "$live/cert.pem" ] || die "No certificate named $1"
+  out "$live/"
+  out "  cert.pem       certificate"
+  out "  privkey.pem    private key"
+  out "  chain.pem      CA bundle"
+  out "  fullchain.pem  certificate + CA bundle"
+}
+
+cmd_delete() {
+  [ -f "$CONFIG_DIR/live/$1/cert.pem" ] || die "No certificate named $1"
+  certbot_quiet delete --non-interactive --cert-name "$1" || die "Delete failed"
+  ok "Deleted $1"
+}
+
+cmd_install() {
+  [ -f "$CONFIG_DIR/live/$1/cert.pem" ] || die "No certificate named $1"
+  has_uapi || die "cPanel uapi not available"
+  install_cert "$CONFIG_DIR/live/$1" "$(cert_domains "$1")"
+}
+
 cmd_update() {
-  info "Updating certy from github.com/$CERTY_REPO"
   local ref mode=--user
   [ "$SELF" = /usr/local/bin/certy ] && mode=--root
   ref="$(curl -fsSL "https://api.github.com/repos/$CERTY_REPO/commits/main" 2>/dev/null |
@@ -495,13 +538,86 @@ cmd_update() {
   curl -fsSL "https://raw.githubusercontent.com/$CERTY_REPO/${ref:-main}/install.sh" | bash -s -- "$mode"
 }
 
+# ---------------------------------------------------------------- interactive
+banner() {
+  out "${C}                 _"
+  out "   ___ ___ _ __| |_ _   _"
+  out "  / __/ _ \\ '__| __| | | |"
+  out " | (_|  __/ |  | |_| |_| |"
+  out "  \\___\\___|_|   \\__|\\__, |"
+  out "                    |___/${N}  ${B}free SSL for cPanel${N} v$CERTY_VERSION"
+  out ""
+}
+
+ask() { # prompt [default]
+  local a
+  printf '%s' "$1" >/dev/tty
+  read -r a </dev/tty || a=""
+  printf '%s' "${a:-${2:-}}"
+}
+
+wizard() {
+  local dom wild method
+  dom="$(ask "Domain: ")"
+  [ -n "$dom" ] || die "No domain given"
+  local -a args=(-d "$dom")
+  wild="$(ask "Include wildcard (*.${dom%%[ ,]*})? [y/N]: " n)"
+  case "$wild" in y|Y|yes) args+=(--wildcard) ;; esac
+  if has_uapi; then
+    out "Verification:  1) Automatic (cPanel DNS)   2) Manual (I add the DNS record)"
+    method="$(ask "Choose [1]: " 1)"
+    [ "$method" = 2 ] && args+=(--manual)
+  fi
+  out ""
+  cmd_issue "${args[@]}"
+}
+
+manage() {
+  local -a names=()
+  local n sel act
+  cmd_list || return 0
+  while read -r n; do [ -n "$n" ] && names+=("$n"); done <<EOF_NAMES
+$(cert_names)
+EOF_NAMES
+  sel="$(ask "Select # (Enter to exit): ")"
+  [ -n "$sel" ] || return 0
+  case "$sel" in *[!0-9]*) die "Invalid choice" ;; esac
+  [ "$sel" -ge 1 ] && [ "$sel" -le ${#names[@]} ] || die "Invalid choice"
+  n="${names[$((sel - 1))]}"
+  out "${B}$n${N}:  1) Renew now   2) Install on cPanel   3) Show files   4) Delete"
+  act="$(ask "Choose (Enter to exit): ")"
+  case "$act" in
+    1) certbot_quiet renew --non-interactive --cert-name "$n" --force-renewal && ok "Renewed $n" || die "Renew failed" ;;
+    2) cmd_install "$n" ;;
+    3) cmd_show "$n" ;;
+    4) [ "$(ask "Delete $n? Type yes to confirm: ")" = yes ] && cmd_delete "$n" ;;
+    *) ;;
+  esac
+}
+
+interactive() {
+  { : </dev/tty; } 2>/dev/null || { usage; exit 0; }
+  banner
+  if [ -z "$(cert_names)" ]; then wizard; return; fi
+  out "1) New SSL   2) Manage SSLs"
+  case "$(ask "Choose [1]: " 1)" in
+    2) manage ;;
+    *) out ""; wizard ;;
+  esac
+}
+
 case "${1:-}" in
-  ""|-h|--help|help) usage ;;
+  "") interactive ;;
+  -h|--help|help) usage ;;
   version|-v|--version) echo "certy $CERTY_VERSION"; "$(find_certbot)" --version 2>/dev/null || true ;;
   renew) shift; cmd_renew "$@" ;;
-  list) shift; run_certbot certificates "$@" ;;
-  cron) install_cron ;;
-  uninstall-cron) crontab -l 2>/dev/null | grep -vF "$SELF\" renew" | crontab - ; ok "Cron entry removed" ;;
+  list|ls) cmd_list || true ;;
+  show) [ $# -ge 2 ] || die "Usage: certy show NAME"; cmd_show "$2" ;;
+  delete|rm) [ $# -ge 2 ] || die "Usage: certy delete NAME"; cmd_delete "$2" ;;
+  install) [ $# -ge 2 ] || die "Usage: certy install NAME"; cmd_install "$2" ;;
+  manage) manage ;;
+  cron) install_cron; ok "Auto-renew enabled" ;;
+  uninstall-cron) crontab -l 2>/dev/null | grep -vF "$SELF\" renew" | crontab - ; ok "Auto-renew disabled" ;;
   update) cmd_update ;;
   __hook-auth) hook_auth ;;
   __hook-cleanup) hook_cleanup ;;
