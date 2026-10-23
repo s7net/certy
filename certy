@@ -296,7 +296,9 @@ install_cert() {
         break
       fi
     done
-  done < <(cpanel domains)
+  done <<EOF_DOMAINS
+$(cpanel domains)
+EOF_DOMAINS
   [ "$n" -gt 0 ] || warn "No matching cPanel domain found to install the certificate on"
 }
 
@@ -344,7 +346,9 @@ cmd_issue() {
     [ "$wildcard" = 1 ] && [ "${d#\*.}" = "$d" ] && list+=("*.$d")
   done
   local -a uniq=()
-  while read -r d; do uniq+=("$d"); done < <(printf '%s\n' "${list[@]}" | awk '!seen[$0]++')
+  for d in "${list[@]}"; do
+    case " ${uniq[*]:-} " in *" $d "*) ;; *) uniq+=("$d") ;; esac
+  done
 
   mkdir -p "$CERTY_HOME" "$STATE_DIR"
   [ -n "$email" ] && echo "EMAIL=$email" >"$SETTINGS"
