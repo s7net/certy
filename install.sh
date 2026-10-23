@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # certy installer
 #
-#   curl -fsSL https://raw.githubusercontent.com/OWNER/certy/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/s7net/certy/main/install.sh | bash
 #
 # User mode (default, no root needed - e.g. cPanel with terminal access):
 #   installs certy + a standalone certbot binary into ~/bin
@@ -11,7 +11,7 @@
 # Options: --user | --root | --repo OWNER/NAME | --version TAG
 set -euo pipefail
 
-REPO="${CERTY_REPO:-OWNER/certy}"
+REPO="${CERTY_REPO:-s7net/certy}"
 VERSION="${CERTY_VERSION:-latest}"
 MODE=""
 

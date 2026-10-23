@@ -16,13 +16,13 @@ certy -d example.com --wildcard
 روی هاست سی‌پنل (Terminal یا SSH):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/certy/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/s7net/certy/main/install.sh | bash
 ```
 
 اگر دسترسی root دارید و می‌خواهید certbot از پکیج‌منیجر سیستم‌عامل نصب شود:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/OWNER/certy/main/install.sh | bash -s -- --root
+curl -fsSL https://raw.githubusercontent.com/s7net/certy/main/install.sh | bash -s -- --root
 ```
 
 (اگر هیچ‌کدام از `--root` / `--user` را ندهید، نصاب از شما می‌پرسد.)
