@@ -18,6 +18,9 @@ LOGS_DIR="$CERTY_HOME/logs"
 STATE_DIR="$CERTY_HOME/state"
 SETTINGS="$CERTY_HOME/settings"
 DNS_TIMEOUT="${CERTY_DNS_TIMEOUT:-300}"
+export CERTY_RUN="${CERTY_RUN:-$$}"   # isolates state between parallel runs
+RECORDS="$STATE_DIR/records.$CERTY_RUN"
+ABORTED="$STATE_DIR/aborted.$CERTY_RUN"
 CF_DIR="$CERTY_HOME/cloudflare"   # one file per saved API token
 CF_TOKEN_FILE=""                   # the token file in use
 # Pre-filled "create API token" page with only the DNS edit permission.
@@ -244,7 +247,8 @@ cf_table() {
 
 # Asks for a token, checks it and saves it to file $1 (new or existing).
 cf_save_token() { # file name
-  local f="$1" name="$2" tok zones i
+  local f="$1" name tok zones i
+  name="$(printf '%s' "$2" | tr -cd 'A-Za-z0-9 _.-')"; name="${name:-token}"
   out "Create a token with DNS edit permission: ${C}$CF_TOKEN_URL${N}"
   for i in 1 2 3; do
     printf '%s' "API token: " >/dev/tty
@@ -298,7 +302,7 @@ cmd_cloudflare() {
          out "  2) Replace the token"
          out "  0) Back"
          case "$(ask "Choose [0]: " 0)" in
-           1) name="$(ask "New name: ")"
+           1) name="$(ask "New name: " | tr -cd 'A-Za-z0-9 _.-')"
               [ -n "$name" ] && sed -i.bak "s/^NAME=.*/NAME=$(printf '%s' "$name" | sed 's/[\/&]/\\&/g')/" "$f" && rm -f "$f.bak" && ok "Renamed" ;;
            2) cf_save_token "$f" "$(cf_field "$f" NAME)" || true ;;
          esac ;;
@@ -349,12 +353,13 @@ table() {
 # dig is missing or port 53 is blocked.
 ns_of() {
   local out
-  if command -v dig >/dev/null 2>&1 && out="$(dig +time=3 +tries=1 +short NS "$1" 2>/dev/null)"; then
-    printf '%s\n' "$out" | grep '\.$' || true
+  if command -v dig >/dev/null 2>&1 && out="$(dig +time=3 +tries=1 +noall +answer NS "$1" 2>/dev/null)"; then
+    printf '%s\n' "$out" | awk -v n="$1." 'tolower($1) == tolower(n) && $4 == "NS" { print tolower($5) }'
     return
   fi
   curl -fsS -m 10 "https://dns.google/resolve?name=$1&type=NS" 2>/dev/null |
-    grep -o '"type": *2,"TTL": *[0-9]*,"data": *"[^"]*"' | sed -e 's/.*"data": *"//' -e 's/"$//' || true
+    grep -o '"name": *"[^"]*", *"type": *2,"TTL": *[0-9]*,"data": *"[^"]*"' |
+    awk -v n="$1." -F'"' 'tolower($4) == tolower(n) { print tolower($(NF-1)) }' || true
 }
 
 # Prints "<zone> <ns> <ns>..." for the zone a name lives in.
@@ -457,7 +462,7 @@ wait_for_done() {
     ans="$(printf '%s' "$ans" | tr 'a-z' 'A-Z' | tr -d '[:space:]')"
     case "$ans" in
       DONE) ;;
-      ABORT|EXIT|QUIT) touch "$STATE_DIR/aborted"; exit 1 ;;
+      ABORT|EXIT|QUIT) touch "$ABORTED"; exit 1 ;;
       *) continue ;;
     esac
     if all_visible "$f"; then
@@ -472,15 +477,14 @@ wait_for_done() {
 
 # ---------------------------------------------------------------- hooks
 # Certbot calls these with CERTBOT_DOMAIN / CERTBOT_VALIDATION set.
-hook_auth() {
-  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records"
+hook_auth() { # auto|manual
+  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$RECORDS" mode="${1:-auto}"
   mkdir -p "$STATE_DIR"
   printf '%s\t%s\t%s\n' "$name" "$CERTBOT_VALIDATION" pending >>"$f"
   # Certbot runs the hook once per challenge; act once all are queued.
   [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] || return 0
 
-  local mode value method info zone id cfz="" tmp="$f.new" a
-  mode="$(cat "$STATE_DIR/mode" 2>/dev/null || echo auto)"
+  local value method info zone id cfz="" tmp="$f.new" a
   # Decide per record by the zone's real nameservers: cPanel is used silently
   # when it serves the zone; Cloudflare (with a saved token) after asking.
   : >"$tmp"
@@ -561,8 +565,8 @@ cpanel_serves() { # name "public ns list"
 
 # Removes TXT records we added when certbot didn't get to it.
 remove_leftovers() {
-  local f="$STATE_DIR/records" name value method
-  rm -f "$STATE_DIR/aborted"
+  local f="$RECORDS" name value method
+  rm -f "$ABORTED"
   [ -f "$f" ] || return 0
   while IFS=$'\t' read -r name value method; do
     remove_record "$name" "$value" "$method"
@@ -572,7 +576,7 @@ remove_leftovers() {
 }
 
 hook_cleanup() {
-  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records" method
+  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$RECORDS" method
   method="$(awk -F'\t' -v n="$name" -v v="$CERTBOT_VALIDATION" '$1 == n && $2 == v { print $3; exit }' "$f" 2>/dev/null)"
   remove_record "$name" "$CERTBOT_VALIDATION" "$method"
   [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] && rm -f "$f"
@@ -603,8 +607,8 @@ EOF_DOMAINS
   return 0
 }
 
-hook_deploy() {
-  [ -f "$STATE_DIR/no-install" ] && return 0
+hook_deploy() { # [noinstall]
+  [ "${1:-}" = noinstall ] && return 0
   install_cert "$RENEWED_LINEAGE" "$RENEWED_DOMAINS"
 }
 
@@ -633,15 +637,27 @@ cert_expiry() {
 
 # Runs certbot with its chatter hidden; shows only the useful part on failure.
 certbot_quiet() {
-  local log="$CERTY_HOME/tmp/last-run.log"
-  mkdir -p "$CERTY_HOME/tmp"
-  if run_certbot "$@" >"$log" 2>&1; then return 0; fi
-  [ -f "$STATE_DIR/aborted" ] && return 1
+  local log="$CERTY_HOME/tmp/last-run.$CERTY_RUN.log" rc=0
+  mkdir -p "$CERTY_HOME/tmp" "$STATE_DIR"
+  rm -f "$ABORTED"
+  # Ctrl+C also hits certbot; keep its traceback out of sight and undo
+  # any DNS records we already created.
+  trap 'touch "$ABORTED"' INT
+  run_certbot "$@" >"$log" 2>&1 || rc=$?
+  trap - INT
+  [ "$rc" = 0 ] && { rm -f "$log"; return 0; }
+  if [ -f "$ABORTED" ]; then
+    rm -f "$log"
+    remove_leftovers
+    out ""; out "${R}✘ Cancelled${N}"
+    return 130
+  fi
   if grep -q 'Detail:' "$log"; then
     grep 'Detail:' "$log" | sed 's/^[[:space:]]*Detail:[[:space:]]*//' | awk '!seen[$0]++'
   else
     grep -vE '^(Saving debug log|Ask for help|See the logfile)|^[[:space:]]*$' "$log" | head -n 8
   fi | while IFS= read -r l; do out "  $l"; done
+  rm -f "$log"
   return 1
 }
 
@@ -692,35 +708,29 @@ cmd_issue() {
   [ -n "$email" ] && echo "EMAIL=$email" >"$SETTINGS"
   [ -z "$email" ] && [ -f "$SETTINGS" ] && email="$(sed -n 's/^EMAIL=//p' "$SETTINGS")"
 
-  [ "$manual" = 1 ] && echo manual >"$STATE_DIR/mode" || echo auto >"$STATE_DIR/mode"
-  [ "$no_install" = 1 ] && touch "$STATE_DIR/no-install" || rm -f "$STATE_DIR/no-install"
-  rm -f "$STATE_DIR/records" "$STATE_DIR/aborted" "$STATE_DIR/cf-skip" "$STATE_DIR/cf-yes"
+  rm -f "$RECORDS" "$ABORTED"
+  local mode=auto deploy=""
+  [ "$manual" = 1 ] && mode=manual
+  [ "$no_install" = 1 ] && deploy=" noinstall"
 
   local name="${uniq[0]#\*.}"
   out "Requesting SSL for ${B}${uniq[*]}${N}"
 
   local -a args=(certonly --non-interactive --agree-tos --cert-name "$name"
     --manual --preferred-challenges dns
-    --manual-auth-hook "$SELF __hook-auth"
+    --manual-auth-hook "$SELF __hook-auth $mode"
     --manual-cleanup-hook "$SELF __hook-cleanup"
-    --deploy-hook "$SELF __hook-deploy"
+    --deploy-hook "$SELF __hook-deploy$deploy"
     --expand)
   for d in "${uniq[@]}"; do args+=(-d "$d"); done
   if [ -n "$email" ]; then args+=(-m "$email"); else args+=(--register-unsafely-without-email); fi
   [ "$staging" = 1 ] && args+=(--staging)
   [ "$force" = 1 ] && args+=(--force-renewal)
 
-  # Ctrl+C also hits certbot; keep its traceback out of sight.
-  trap 'touch "$STATE_DIR/aborted"' INT
-  if ! certbot_quiet "${args[@]}"; then
-    trap '' INT
-    if [ -f "$STATE_DIR/aborted" ]; then
-      remove_leftovers
-      out ""; die "Cancelled"
-    fi
-    die "Failed. Full log: $LOGS_DIR/letsencrypt.log"
-  fi
-  trap - INT
+  local rc=0
+  certbot_quiet "${args[@]}" || rc=$?
+  [ "$rc" = 130 ] && exit 130
+  [ "$rc" = 0 ] || die "Failed. Full log: $LOGS_DIR/letsencrypt.log"
 
   local exp; exp="$(cert_expiry "$name")"
   ok "SSL ready for ${B}$name${N} (expires ${exp%% *})"
@@ -729,9 +739,7 @@ cmd_issue() {
 }
 
 cmd_renew() {
-  rm -f "$STATE_DIR/records" "$STATE_DIR/cf-skip" "$STATE_DIR/cf-yes"
-  # Each renewal keeps the hooks it was issued with; mode defaults to auto.
-  [ -f "$STATE_DIR/mode" ] || echo auto >"$STATE_DIR/mode"
+  # Each certificate renews with the hooks (and mode) it was issued with.
   if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
     local n="$1"; shift
     set -- --cert-name "$n" "$@"
@@ -780,7 +788,9 @@ cmd_update() {
   [ "$SELF" = /usr/local/bin/certy ] && mode=--root
   ref="$(curl -fsSL "https://api.github.com/repos/$CERTY_REPO/commits/main" 2>/dev/null |
     sed -n 's/^  "sha": "\([0-9a-f]\{40\}\)".*/\1/p' | head -n1)"
-  curl -fsSL "https://raw.githubusercontent.com/$CERTY_REPO/${ref:-main}/install.sh" | bash -s -- "$mode"
+  # exec: the installer replaces this very file, so don't keep reading it.
+  exec bash -c 'curl -fsSL "$1" | bash -s -- "$2"' _ \
+    "https://raw.githubusercontent.com/$CERTY_REPO/${ref:-main}/install.sh" "$mode"
 }
 
 # ---------------------------------------------------------------- interactive
@@ -806,7 +816,8 @@ wizard() {
   dom="$(ask "Domain: ")"
   [ -n "$dom" ] || die "No domain given"
   local -a args=(-d "$dom")
-  wild="$(ask "Include wildcard (*.${dom%%[ ,]*})? [y/N]: " n)"
+  local base="${dom%%[ ,]*}"; base="${base#\*.}"
+  wild="$(ask "Include wildcard (*.$base)? [y/N]: " n)"
   case "$wild" in y|Y|yes) args+=(--wildcard) ;; esac
   out "Verification:"
   out "  1) Automatic (cPanel / Cloudflare DNS)"
@@ -837,7 +848,9 @@ EOF_NAMES
     out "  4) Delete"
     out "  0) Back"
     case "$(ask "Choose [0]: " 0)" in
-      1) if certbot_quiet renew --non-interactive --cert-name "$n" --force-renewal; then ok "Renewed $n"; else warn "Renew failed"; fi ;;
+      1) local rc=0
+         certbot_quiet renew --non-interactive --cert-name "$n" --force-renewal || rc=$?
+         case "$rc" in 0) ok "Renewed $n" ;; 130) ;; *) warn "Renew failed" ;; esac ;;
       2) cmd_install "$n" || true ;;
       3) cmd_show "$n" ;;
       4) [ "$(ask "Delete $n? Type yes to confirm: ")" = yes ] && { cmd_delete "$n" || true; } ;;
@@ -878,8 +891,8 @@ case "${1:-}" in
   uninstall-cron) crontab -l 2>/dev/null | grep -vF "$SELF\" renew" | crontab - ; ok "Auto-renew disabled" ;;
   update) cmd_update ;;
   cloudflare|cf) cmd_cloudflare ;;
-  __hook-auth) hook_auth ;;
+  __hook-auth) hook_auth "${2:-auto}" ;;
   __hook-cleanup) hook_cleanup ;;
-  __hook-deploy) hook_deploy ;;
+  __hook-deploy) hook_deploy "${2:-}" ;;
   *) cmd_issue "$@" ;;
 esac

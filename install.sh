@@ -119,7 +119,8 @@ install_root() {
     fi
   fi
   command -v certbot >/dev/null 2>&1 || die "certbot installation failed"
-  $SUDO install -m 755 "$TMP/certy" /usr/local/bin/certy
+  $SUDO cp "$TMP/certy" /usr/local/bin/certy.new && $SUDO chmod 755 /usr/local/bin/certy.new &&
+    $SUDO mv -f /usr/local/bin/certy.new /usr/local/bin/certy
   ok "certy installed to /usr/local/bin/certy"
 }
 
@@ -192,7 +193,8 @@ install_user() {
   if [ "$got" = 0 ]; then
     install_venv || die "Could not install certbot (no working binary and no Python >= 3.9)"
   fi
-  install -m 755 "$TMP/certy" "$BIN/certy"
+  # Write next to the target and rename, so a running certy isn't overwritten.
+  cp "$TMP/certy" "$BIN/certy.new" && chmod 755 "$BIN/certy.new" && mv -f "$BIN/certy.new" "$BIN/certy"
   ok "$("$BIN/certy" version 2>/dev/null | paste -sd' ' -) -> $BIN"
 
   case ":$PATH:" in
