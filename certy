@@ -18,6 +18,10 @@ LOGS_DIR="$CERTY_HOME/logs"
 STATE_DIR="$CERTY_HOME/state"
 SETTINGS="$CERTY_HOME/settings"
 DNS_TIMEOUT="${CERTY_DNS_TIMEOUT:-300}"
+CF_TOKEN_FILE="$CERTY_HOME/cloudflare.token"
+# Pre-filled "create API token" page with only the DNS edit permission.
+CF_TOKEN_URL='https://dash.cloudflare.com/profile/api-tokens?permissionGroupKeys=%5B%7B%22key%22%3A%22dns%22%2C%22type%22%3A%22edit%22%7D%5D&accountId=%2A&zoneId=all&name=certy'
+
 
 SELF="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
 
@@ -46,6 +50,7 @@ ${B}certy${N} $CERTY_VERSION - free SSL for cPanel (Let's Encrypt, DNS validatio
   certy list                     list certificates
   certy renew [NAME]             renew due certificates (cron does this daily)
   certy show|install|delete NAME show files / install on cPanel / delete
+  certy cloudflare [remove]      connect (or disconnect) a Cloudflare API token
   certy update                   update certy and certbot
 
 Options: -d DOMAIN (repeat or comma separated)  -w|--wildcard  -e EMAIL
@@ -129,6 +134,14 @@ elsif ($cmd eq "txt-del") {
   my $res = api("DNS", "mass_edit_zone", "zone=$z", "serial=" . serial($r), @rm);
   die errs($res) . "\n" unless $res->{status};
 }
+elsif ($cmd eq "ns") {
+  my ($z, $r) = zone_of($ARGV[0]);
+  for my $rec (@{ $r->{data} }) {
+    next unless ($rec->{record_type} // "") eq "NS";
+    my $d = lc decode_base64($rec->{data_b64}[0] // ""); $d =~ s/\.?$/./;
+    print "$d\n";
+  }
+}
 elsif ($cmd eq "domains") {
   my $d = api("DomainInfo", "list_domains")->{data} || {};
   print "$_\n" for grep { defined && length } $d->{main_domain},
@@ -143,6 +156,94 @@ elsif ($cmd eq "install") {
 }
 else { die "unknown helper command $cmd\n" }
 ' "$@"
+}
+
+# ---------------------------------------------------------------- Cloudflare
+# Cloudflare API via curl; the token goes in a private curl config file so it
+# never shows up in `ps` on a shared host.
+cf() {
+  local tok hdr rc=0
+  tok="$(cat "$CF_TOKEN_FILE" 2>/dev/null)" && [ -n "$tok" ] || return 1
+  mkdir -p "$CERTY_HOME/tmp"
+  hdr="$CERTY_HOME/tmp/cf.$$"
+  (umask 077; printf 'header = "Authorization: Bearer %s"\n' "$tok" >"$hdr")
+  CERTY_CF_HDR="$hdr" perl -MJSON::PP -e '
+use strict; use warnings;
+my $api = $ENV{CERTY_CF_API} || "https://api.cloudflare.com/client/v4";
+sub call {
+  my ($method, $path, $body) = @_;
+  my @cmd = ("curl", "-sS", "-m", "20", "-K", $ENV{CERTY_CF_HDR}, "-X", $method,
+             "-H", "Content-Type: application/json", "$api$path");
+  push @cmd, "--data", encode_json($body) if $body;
+  open(my $fh, "-|", @cmd) or die "curl: $!\n";
+  local $/; my $raw = <$fh>; close $fh;
+  my $j = eval { decode_json($raw) } or die "Cloudflare: no valid response\n";
+  die "Cloudflare: " . join("; ", map { $_->{message} } @{ $j->{errors} || [] }) . "\n" unless $j->{success};
+  return $j->{result};
+}
+sub zone_id {
+  my $z = call("GET", "/zones?name=$_[0]");
+  die "Cloudflare: token has no access to $_[0]\n" unless @$z;
+  return $z->[0]{id};
+}
+my $cmd = shift // "";
+if ($cmd eq "check") { $ARGV[0] ? zone_id($ARGV[0]) : call("GET", "/zones?per_page=1"); }
+elsif ($cmd eq "add") {
+  my ($name, $value, $zone) = @ARGV; my $zid = zone_id($zone);
+  my $r = call("POST", "/zones/$zid/dns_records", { type => "TXT", name => $name, content => $value, ttl => 60 });
+  print "$zid:$r->{id}\n";
+}
+elsif ($cmd eq "del") { call("DELETE", "/zones/$ARGV[0]/dns_records/$ARGV[1]"); }
+else { die "unknown cloudflare command $cmd\n" }
+' "$@" || rc=$?
+  rm -f "$hdr"
+  return $rc
+}
+
+# Reads a token from the terminal, checks it can reach the zone, saves it.
+cf_read_token() { # [zone] -> 0 saved, 1 skipped
+  local zone="${1:-}" tok i
+  for i in 1 2 3; do
+    printf '%s' "Cloudflare API token (Enter to skip): " >/dev/tty
+    read -rs tok </dev/tty || tok=""
+    out ""
+    [ -n "$tok" ] || return 1
+    mkdir -p "$CERTY_HOME"
+    (umask 077; printf '%s' "$tok" >"$CF_TOKEN_FILE")
+    if cf check "$zone" 2>/dev/null; then
+      ok "Cloudflare token saved"
+      return 0
+    fi
+    rm -f "$CF_TOKEN_FILE"
+    warn "This token can't access ${zone:-any zone}. Needs Zone > DNS > Edit."
+  done
+  return 1
+}
+
+cf_connect() { # [zone]
+  { : </dev/tty; } 2>/dev/null || return 1
+  out "Create one with DNS edit permission: ${C}$CF_TOKEN_URL${N}"
+  cf_read_token "${1:-}"
+}
+
+# Decides whether to change the zone's DNS through Cloudflare (once per run).
+cf_ready() { # zone
+  local a
+  [ -f "$STATE_DIR/cf-yes" ] && return 0
+  [ -f "$STATE_DIR/cf-skip" ] && return 1
+  if [ -s "$CF_TOKEN_FILE" ] && cf check "$1" 2>/dev/null; then
+    # Renewals from cron can't answer; the saved token is the consent.
+    { : </dev/tty; } 2>/dev/null || return 0
+    printf '%s' "${B}$1${N} is on Cloudflare. Add the TXT record there automatically? [Y/n]: " >/dev/tty
+    read -r a </dev/tty || a=n
+    case "$a" in n|N|no|NO) touch "$STATE_DIR/cf-skip"; return 1 ;; esac
+    touch "$STATE_DIR/cf-yes"; return 0
+  fi
+  { : </dev/tty; } 2>/dev/null || return 1
+  out "${B}$1${N} is on Cloudflare. Give certy an API token to set the record automatically."
+  if cf_connect "$1"; then touch "$STATE_DIR/cf-yes"; return 0; fi
+  touch "$STATE_DIR/cf-skip"
+  return 1
 }
 
 # ---------------------------------------------------------------- DNS table
@@ -309,12 +410,28 @@ wait_for_done() {
 # Certbot calls these with CERTBOT_DOMAIN / CERTBOT_VALIDATION set.
 hook_auth() {
   local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" value="$CERTBOT_VALIDATION"
-  local f="$STATE_DIR/records" mode method=manual
+  local f="$STATE_DIR/records" mode method=manual info zone id
   mode="$(cat "$STATE_DIR/mode" 2>/dev/null || echo auto)"
   mkdir -p "$STATE_DIR"
-  # Use cPanel when it hosts the zone; otherwise fall back to manual.
-  if [ "$mode" = auto ] && cpanel txt-add "$name" "$value" >/dev/null 2>&1; then
-    method=cpanel
+  # Go by the zone's real (public) nameservers: Cloudflare's API if it's on
+  # Cloudflare, cPanel only if cPanel actually serves the zone, else manual.
+  if [ "$mode" = auto ]; then
+    info="$(zone_info "$name")"; zone="${info%% *}"
+    case "$info" in
+      *.cloudflare.com.*)
+        if cf_ready "$zone"; then
+          if id="$(cf add "$name" "$value" "$zone" 2>&1)"; then
+            method="cloudflare:$id"
+          else
+            warn "$id"
+          fi
+        fi ;;
+      *)
+        if has_uapi && cpanel_serves "$name" "${info#* }" &&
+           cpanel txt-add "$name" "$value" >/dev/null 2>&1; then
+          method=cpanel
+        fi ;;
+    esac
   fi
   printf '%s\t%s\t%s\n' "$name" "$value" "$method" >>"$f"
 
@@ -326,28 +443,49 @@ hook_auth() {
     print_dns_hosts "$f"
     wait_for_done "$f"
   else
-    ok "DNS record added in cPanel"
+    ok "DNS record added via $(cut -f3 "$f" | sed 's/:.*//; s/cpanel/cPanel/; s/cloudflare/Cloudflare/' | sort -u | paste -sd, - | sed 's/,/ + /g')"
     wait_for_dns "$f"
   fi
 }
 
-# Removes TXT records we added in cPanel when certbot didn't get to it.
+# Deletes a TXT record we created ("method" from the records file).
+remove_record() { # name value method
+  case "$3" in
+    cpanel) cpanel txt-del "$1" "$2" >/dev/null 2>&1 ;;
+    cloudflare:*) local ids="${3#cloudflare:}"; cf del "${ids%%:*}" "${ids#*:}" >/dev/null 2>&1 ;;
+  esac
+  return 0
+}
+
+# True when the zone's public nameservers are the ones cPanel lists for it
+# (a cPanel account often keeps a zone even when DNS is hosted elsewhere).
+cpanel_serves() { # name "public ns list"
+  local local_ns ns
+  local_ns="$(cpanel ns "$1" 2>/dev/null)" || return 1
+  [ -n "$2" ] || return 0   # couldn't look up public NS; trust cPanel
+  for ns in $2; do
+    ns="$(printf '%s' "$ns" | tr 'A-Z' 'a-z')"
+    printf '%s\n' "$local_ns" | grep -qxF -- "$ns" && return 0
+  done
+  return 1
+}
+
+# Removes TXT records we added when certbot didn't get to it.
 remove_leftovers() {
   local f="$STATE_DIR/records" name value method
   rm -f "$STATE_DIR/aborted"
   [ -f "$f" ] || return 0
   while IFS=$'\t' read -r name value method; do
-    [ "$method" = cpanel ] && cpanel txt-del "$name" "$value" >/dev/null 2>&1
+    remove_record "$name" "$value" "$method"
   done <"$f"
   rm -f "$f"
   return 0
 }
 
 hook_cleanup() {
-  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records"
-  if grep -qF "$name"$'\t'"$CERTBOT_VALIDATION"$'\tcpanel' "$f" 2>/dev/null; then
-    cpanel txt-del "$name" "$CERTBOT_VALIDATION" >/dev/null 2>&1 || true
-  fi
+  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records" method
+  method="$(awk -F'\t' -v n="$name" -v v="$CERTBOT_VALIDATION" '$1 == n && $2 == v { print $3; exit }' "$f" 2>/dev/null)"
+  remove_record "$name" "$CERTBOT_VALIDATION" "$method"
   [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] && rm -f "$f"
   return 0
 }
@@ -465,10 +603,9 @@ cmd_issue() {
   [ -n "$email" ] && echo "EMAIL=$email" >"$SETTINGS"
   [ -z "$email" ] && [ -f "$SETTINGS" ] && email="$(sed -n 's/^EMAIL=//p' "$SETTINGS")"
 
-  has_uapi || manual=1
   [ "$manual" = 1 ] && echo manual >"$STATE_DIR/mode" || echo auto >"$STATE_DIR/mode"
   [ "$no_install" = 1 ] && touch "$STATE_DIR/no-install" || rm -f "$STATE_DIR/no-install"
-  rm -f "$STATE_DIR/records" "$STATE_DIR/aborted"
+  rm -f "$STATE_DIR/records" "$STATE_DIR/aborted" "$STATE_DIR/cf-skip" "$STATE_DIR/cf-yes"
 
   local name="${uniq[0]#\*.}"
   out "Requesting SSL for ${B}${uniq[*]}${N}"
@@ -503,7 +640,7 @@ cmd_issue() {
 }
 
 cmd_renew() {
-  rm -f "$STATE_DIR/records"
+  rm -f "$STATE_DIR/records" "$STATE_DIR/cf-skip" "$STATE_DIR/cf-yes"
   # Each renewal keeps the hooks it was issued with; mode defaults to auto.
   [ -f "$STATE_DIR/mode" ] || echo auto >"$STATE_DIR/mode"
   if [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
@@ -582,13 +719,11 @@ wizard() {
   local -a args=(-d "$dom")
   wild="$(ask "Include wildcard (*.${dom%%[ ,]*})? [y/N]: " n)"
   case "$wild" in y|Y|yes) args+=(--wildcard) ;; esac
-  if has_uapi; then
-    out "Verification:"
-    out "  1) Automatic (cPanel DNS)"
-    out "  2) Manual (I add the DNS record)"
-    method="$(ask "Choose [1]: " 1)"
-    [ "$method" = 2 ] && args+=(--manual)
-  fi
+  out "Verification:"
+  out "  1) Automatic (cPanel / Cloudflare DNS)"
+  out "  2) Manual (I add the DNS record)"
+  method="$(ask "Choose [1]: " 1)"
+  [ "$method" = 2 ] && args+=(--manual)
   out ""
   cmd_issue "${args[@]}"
 }
@@ -645,6 +780,9 @@ case "${1:-}" in
   cron) install_cron; ok "Auto-renew enabled" ;;
   uninstall-cron) crontab -l 2>/dev/null | grep -vF "$SELF\" renew" | crontab - ; ok "Auto-renew disabled" ;;
   update) cmd_update ;;
+  cloudflare)
+    if [ "${2:-}" = remove ]; then rm -f "$CF_TOKEN_FILE"; ok "Cloudflare disconnected"
+    else cf_connect || die "Cloudflare not connected"; fi ;;
   __hook-auth) hook_auth ;;
   __hook-cleanup) hook_cleanup ;;
   __hook-deploy) hook_deploy ;;

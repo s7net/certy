@@ -11,6 +11,7 @@ certy -d example.com --wildcard
 - **No root required**: everything is installed into `~/bin` and `~/.certy`.
 - **Bundled certbot**: a standalone certbot binary is built with GitHub Actions and published in Releases (no Python needed).
 - **Always DNS validation (DNS-01)**: TXT records are added and removed automatically through cPanel's `uapi`, and shown in a clean table.
+- **Cloudflare**: give certy a Cloudflare API token (DNS edit) once; for domains on Cloudflare it asks for a quick confirmation and sets the record itself.
 - **Manual fallback**: if the zone isn't hosted on this cPanel (e.g. Cloudflare), certy prints the records, waits for you to type `DONE`, checks DNS itself and tells you which record is still missing.
 - **Automatic install into cPanel** and **automatic renewal** via cron.
 
@@ -88,6 +89,7 @@ Running `certy` when certificates exist offers **Manage SSLs**: pick one to rene
 | `certy install NAME` | Install a certificate on its cPanel domains |
 | `certy show NAME` | Show certificate file paths |
 | `certy delete NAME` | Delete a certificate |
+| `certy cloudflare [remove]` | Save (or remove) a Cloudflare API token |
 | `certy update` | Update certy and certbot (with download progress) |
 
 | Option | Description |
