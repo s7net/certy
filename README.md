@@ -1,50 +1,50 @@
 # certy
 
-گرفتن SSL رایگان (Let's Encrypt) روی هاست سی‌پنل فقط با یک دستور — بر پایه‌ی `certbot`.
+Free SSL certificates (Let's Encrypt) on cPanel hosting with a single command — powered by `certbot`.
 
 ```bash
 certy -d example.com --wildcard
 ```
 
-- **بدون نیاز به root**: همه‌چیز در `~/bin` و `~/.certy` نصب می‌شود.
-- **certbot آماده**: باینری مستقل certbot با GitHub Actions ساخته شده و در Releases قرار دارد (بدون نیاز به Python).
-- **وریفای همیشه با DNS (DNS-01)**: رکوردهای TXT از طریق `uapi` سی‌پنل خودکار اضافه و بعد حذف می‌شوند و در یک جدول نمایش داده می‌شوند.
-- **نصب خودکار روی سی‌پنل** و **تمدید خودکار** با cron.
+- **No root required**: everything is installed into `~/bin` and `~/.certy`.
+- **Bundled certbot**: a standalone certbot binary is built with GitHub Actions and published in Releases (no Python needed).
+- **Always DNS validation (DNS-01)**: TXT records are added and removed automatically through cPanel's `uapi`, and shown in a clean table.
+- **Automatic install into cPanel** and **automatic renewal** via cron.
 
-## نصب
+## Install
 
-روی هاست سی‌پنل (Terminal یا SSH):
+On your cPanel host (Terminal or SSH):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/s7net/certy/main/install.sh | bash
 ```
 
-اگر دسترسی root دارید و می‌خواهید certbot از پکیج‌منیجر سیستم‌عامل نصب شود:
+If you have root access and want certbot installed from the OS package manager:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/s7net/certy/main/install.sh | bash -s -- --root
 ```
 
-(اگر هیچ‌کدام از `--root` / `--user` را ندهید، نصاب از شما می‌پرسد.)
+If neither `--root` nor `--user` is given, the installer asks.
 
-## استفاده
+## Usage
 
 ```bash
-# دامنه + وایلدکارد (*.example.com)
+# Domain + wildcard (*.example.com)
 certy -d example.com --wildcard
 
-# چند دامنه، بدون وایلدکارد
+# Multiple domains, no wildcard
 certy -d example.com -d www.example.com -d shop.example.com
 certy -d example.com,www.example.com
 
-# با ایمیل برای هشدار انقضا
+# With an email for expiry notices
 certy -d example.com -e me@example.com
 
-# DNS دست شما نیست (مثلاً Cloudflare): رکوردها را چاپ می‌کند و منتظر می‌ماند
+# DNS not hosted on this cPanel (e.g. Cloudflare): print the records and wait
 certy -d example.com --wildcard --manual
 ```
 
-خروجی نمونه:
+Sample output:
 
 ```
 ┌───┬──────────────────────────────┬──────┬─────┬─────────────────────────────────────────────┬────────┐
@@ -55,36 +55,36 @@ certy -d example.com --wildcard --manual
 └───┴──────────────────────────────┴──────┴─────┴─────────────────────────────────────────────┴────────┘
 ```
 
-| دستور | کار |
+| Command | Description |
 |---|---|
-| `certy renew` | تمدید همه‌ی گواهی‌ها (cron روزانه خودکار اضافه می‌شود) |
-| `certy list` | لیست گواهی‌ها |
-| `certy cron` / `certy uninstall-cron` | افزودن / حذف cron تمدید |
-| `certy update` | به‌روزرسانی certy و certbot |
+| `certy renew` | Renew all certificates (a daily cron job is added automatically) |
+| `certy list` | List certificates |
+| `certy cron` / `certy uninstall-cron` | Add / remove the renewal cron job |
+| `certy update` | Update certy and certbot |
 
-| گزینه | توضیح |
+| Option | Description |
 |---|---|
-| `-d, --domain` | دامنه (قابل تکرار یا با کاما) |
-| `-w, --wildcard` | اضافه کردن `*.domain` برای هر دامنه |
-| `-e, --email` | ایمیل حساب Let's Encrypt (ذخیره می‌شود) |
-| `--manual` | بدون دست زدن به DNS؛ فقط جدول را نشان می‌دهد |
-| `--no-install` | نصب نکردن گواهی روی سی‌پنل |
-| `--staging` | سرور تست Let's Encrypt |
-| `--force` | صدور مجدد حتی اگر گواهی معتبر است |
+| `-d, --domain` | Domain to include (repeatable or comma separated) |
+| `-w, --wildcard` | Also include `*.domain` for each domain |
+| `-e, --email` | Let's Encrypt account email (remembered) |
+| `--manual` | Don't touch DNS; only print the records table and wait |
+| `--no-install` | Don't install the certificate into cPanel |
+| `--staging` | Use the Let's Encrypt staging server |
+| `--force` | Re-issue even if the current certificate is still valid |
 
-فایل‌ها: `~/.certy/config/live/<domain>/` (`fullchain.pem`, `privkey.pem`, …)
+Certificates are stored in `~/.certy/config/live/<domain>/` (`fullchain.pem`, `privkey.pem`, …).
 
-متغیر `CERTY_DNS_TIMEOUT` (پیش‌فرض ۳۰۰ ثانیه) حداکثر زمان انتظار برای انتشار DNS است.
+`CERTY_DNS_TIMEOUT` (default 300 seconds) sets the maximum wait for DNS propagation.
 
-## ساخت باینری certbot
+## Building the certbot binary
 
-ورک‌فلو [`.github/workflows/release.yml`](.github/workflows/release.yml) با هر تگ `v*` (یا اجرای دستی) certbot را با PyInstaller داخل کانتینر `manylinux2014` برای `x86_64` و `aarch64` می‌سازد (سازگار با CentOS 7 / CloudLinux و جدیدتر) و در Release آپلود می‌کند:
+The [`.github/workflows/release.yml`](.github/workflows/release.yml) workflow runs on every `v*` tag (or manually). It builds certbot with PyInstaller inside a `manylinux2014` container for `x86_64` and `aarch64` (compatible with CentOS 7 / CloudLinux and newer) and uploads it to the Release:
 
 ```bash
-git tag v1.0.0 && git push origin v1.0.0
+git tag v1.0.1 && git push origin v1.0.1
 ```
 
-اگر باینری روی سرور اجرا نشود، نصاب به‌صورت خودکار certbot را در یک virtualenv پایتون نصب می‌کند.
+If the binary doesn't run on a server, the installer automatically falls back to installing certbot in a Python virtualenv.
 
 ## License
 
