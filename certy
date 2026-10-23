@@ -564,7 +564,9 @@ wizard() {
   wild="$(ask "Include wildcard (*.${dom%%[ ,]*})? [y/N]: " n)"
   case "$wild" in y|Y|yes) args+=(--wildcard) ;; esac
   if has_uapi; then
-    out "Verification:  1) Automatic (cPanel DNS)   2) Manual (I add the DNS record)"
+    out "Verification:"
+    out "  1) Automatic (cPanel DNS)"
+    out "  2) Manual (I add the DNS record)"
     method="$(ask "Choose [1]: " 1)"
     [ "$method" = 2 ] && args+=(--manual)
   fi
@@ -584,7 +586,11 @@ EOF_NAMES
   case "$sel" in *[!0-9]*) die "Invalid choice" ;; esac
   [ "$sel" -ge 1 ] && [ "$sel" -le ${#names[@]} ] || die "Invalid choice"
   n="${names[$((sel - 1))]}"
-  out "${B}$n${N}:  1) Renew now   2) Install on cPanel   3) Show files   4) Delete"
+  out "${B}$n${N}"
+  out "  1) Renew now"
+  out "  2) Install on cPanel"
+  out "  3) Show files"
+  out "  4) Delete"
   act="$(ask "Choose (Enter to exit): ")"
   case "$act" in
     1) certbot_quiet renew --non-interactive --cert-name "$n" --force-renewal && ok "Renewed $n" || die "Renew failed" ;;
@@ -599,7 +605,8 @@ interactive() {
   { : </dev/tty; } 2>/dev/null || { usage; exit 0; }
   banner
   if [ -z "$(cert_names)" ]; then wizard; return; fi
-  out "1) New SSL   2) Manage SSLs"
+  out "  1) New SSL"
+  out "  2) Manage SSLs"
   case "$(ask "Choose [1]: " 1)" in
     2) manage ;;
     *) out ""; wizard ;;

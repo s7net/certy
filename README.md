@@ -43,7 +43,9 @@ $ certy
 
 Domain: example.com
 Include wildcard (*.example.com)? [y/N]: y
-Verification:  1) Automatic (cPanel DNS)   2) Manual (I add the DNS record)
+Verification:
+  1) Automatic (cPanel DNS)
+  2) Manual (I add the DNS record)
 Choose [1]: 1
 
 Requesting SSL for example.com *.example.com
