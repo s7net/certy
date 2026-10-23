@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/banner.svg" alt="certy - free SSL for cPanel in one command" width="100%"></p>
+
 # certy
 
 Free SSL certificates (Let's Encrypt) on cPanel hosting with a single command — powered by `certbot`.

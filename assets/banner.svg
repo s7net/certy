@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="460" viewBox="0 0 1200 460" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1220"/>
+      <stop offset="1" stop-color="#111c33"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#34d399"/>
+      <stop offset="1" stop-color="#22d3ee"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.2" cy="0.3" r="0.6">
+      <stop offset="0" stop-color="#22d3ee" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#22d3ee" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="460" rx="24" fill="url(#bg)"/>
+  <rect width="1200" height="460" rx="24" fill="url(#glow)"/>
+
+  <!-- left: logo + title -->
+  <g transform="translate(70 120)">
+    <rect x="0" y="34" width="64" height="54" rx="10" fill="url(#accent)"/>
+    <path d="M14 34 V22 a18 18 0 0 1 36 0 V34" fill="none" stroke="url(#accent)" stroke-width="9" stroke-linecap="round"/>
+    <circle cx="32" cy="56" r="7" fill="#0b1220"/>
+    <rect x="29" y="58" width="6" height="16" rx="3" fill="#0b1220"/>
+  </g>
+  <text x="160" y="200" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="88" font-weight="800" fill="#f8fafc" letter-spacing="-3">certy</text>
+  <text x="72" y="262" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="27" font-weight="600" fill="#cbd5e1">Free SSL for cPanel in one command</text>
+  <text x="72" y="298" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="17" fill="#64748b">Let's Encrypt · certbot · DNS validation · auto-renew</text>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="15" fill="#0b1220" font-weight="700">
+    <rect x="72" y="332" width="104" height="32" rx="16" fill="#34d399"/>
+    <text x="124" y="353" text-anchor="middle">no root</text>
+    <rect x="188" y="332" width="112" height="32" rx="16" fill="#22d3ee"/>
+    <text x="244" y="353" text-anchor="middle">wildcard</text>
+    <rect x="312" y="332" width="124" height="32" rx="16" fill="#a5b4fc"/>
+    <text x="374" y="353" text-anchor="middle">cPanel API</text>
+  </g>
+
+  <!-- right: terminal -->
+  <g transform="translate(610 70)">
+    <rect width="530" height="320" rx="14" fill="#020617" stroke="#1e293b" stroke-width="2"/>
+    <rect width="530" height="40" rx="14" fill="#0f172a"/>
+    <rect y="26" width="530" height="14" fill="#0f172a"/>
+    <circle cx="24" cy="20" r="7" fill="#f87171"/>
+    <circle cx="48" cy="20" r="7" fill="#fbbf24"/>
+    <circle cx="72" cy="20" r="7" fill="#34d399"/>
+    <text x="265" y="26" font-size="13" fill="#64748b" text-anchor="middle">~ — bash</text>
+    <g font-size="15">
+      <text x="26" y="84" fill="#34d399">$ <tspan fill="#f8fafc">certy -d example.com --wildcard</tspan></text>
+      <text x="26" y="124" fill="#94a3b8">Requesting SSL for example.com *.example.com</text>
+      <text x="26" y="160" fill="#34d399">✔ <tspan fill="#e2e8f0">DNS record added via cPanel</tspan></text>
+      <text x="26" y="196" fill="#94a3b8">Waiting for DNS...</text>
+      <text x="26" y="232" fill="#34d399">✔ <tspan fill="#e2e8f0">SSL ready for </tspan><tspan fill="#f8fafc" font-weight="700">example.com</tspan><tspan fill="#94a3b8"> (expires 2027-01-21)</tspan></text>
+      <text x="26" y="268" fill="#34d399">✔ <tspan fill="#e2e8f0">Installed on cPanel: example.com</tspan></text>
+      <text x="26" y="300" fill="#34d399">$ <tspan fill="#f8fafc">▌</tspan></text>
+    </g>
+  </g>
+</svg>
