@@ -191,90 +191,136 @@ table() {
   hline "└" "┴" "┘"
 }
 
-# Returns 0 once every authoritative nameserver of the zone serves the value.
+# Nameservers that are authoritative for a name (walks up to the zone apex).
+auth_servers() {
+  local d="$1" ns
+  while [ "${d#*.}" != "$d" ]; do
+    ns="$(dig +time=3 +tries=1 +short NS "$d" 2>/dev/null | grep '\.$' || true)"
+    [ -n "$ns" ] && { echo "$ns"; return; }
+    d="${d#*.}"
+  done
+}
+
+# Returns 0 when the TXT value is published. Asks the authoritative
+# nameservers with dig; if they can't be reached (port 53 blocked, no dig)
+# falls back to public DNS-over-HTTPS.
 txt_visible() {
-  local name="$1" value="$2" zone="$3" ns found
-  command -v dig >/dev/null 2>&1 || return 2
-  local servers
-  servers="$(dig +short NS "$zone" 2>/dev/null)"
-  [ -n "$servers" ] || servers="8.8.8.8"
-  for ns in $servers; do
-    found="$(dig +short TXT "$name" "@$ns" 2>/dev/null | tr -d '"')"
-    grep -qxF -- "$value" <<<"$found" || return 1
-  done
-}
-
-wait_for_dns() {
-  local f="$1" deadline=$(( $(date +%s) + DNS_TIMEOUT )) pending name value zone
-  local has_dig=1
-  command -v dig >/dev/null 2>&1 || has_dig=0
-  if [ "$has_dig" = 0 ]; then
-    info "dig not available; waiting 60s for DNS to propagate"
-    sleep 60; return
+  local name="$1" value="$2" ns servers answer reached=0
+  if command -v dig >/dev/null 2>&1; then
+    servers="$(auth_servers "$name")"
+    for ns in $servers; do
+      answer="$(dig +time=3 +tries=1 +short TXT "$name" "@$ns" 2>/dev/null)" || continue
+      reached=1
+      printf '%s\n' "$answer" | tr -d '"' | grep -qxF -- "$value" || return 1
+    done
+    [ "$reached" = 1 ] && return 0
   fi
-  info "Waiting for DNS propagation (up to ${DNS_TIMEOUT}s)..."
-  while :; do
-    pending=0
-    while IFS=$'\t' read -r name value zone; do
-      txt_visible "$name" "$value" "$zone" || pending=$((pending + 1))
-    done <"$f"
-    [ "$pending" = 0 ] && { ok "All TXT records are visible on the authoritative nameservers"; sleep 5; return; }
-    [ "$(date +%s)" -ge "$deadline" ] && { warn "Timed out waiting for $pending record(s); trying anyway"; return; }
-    sleep 10
+  for ns in "https://dns.google/resolve" "https://cloudflare-dns.com/dns-query"; do
+    curl -fsS -m 10 -H 'accept: application/dns-json' "$ns?name=$name&type=TXT" 2>/dev/null |
+      grep -o '"data": *"[^}]*"' | sed -e 's/^"data": *"//' -e 's/"$//' -e 's/\\"//g' |
+      grep -qxF -- "$value" || return 1
   done
 }
 
+# Records file: one "name<TAB>value<TAB>method" line per challenge, where
+# method is "cpanel" (added through uapi) or "manual" (user adds it).
 print_records() {
-  local f="$1" status="$2" n=0 name value zone
+  local f="$1" check="${2:-}" n=0 name value method status
   local -a rows=("#|Name|Type|TTL|Value|Status")
-  while IFS=$'\t' read -r name value zone; do
-    n=$((n + 1)); rows+=("$n|$name|TXT|60|$value|$status")
+  while IFS=$'\t' read -r name value method; do
+    n=$((n + 1))
+    if [ -n "$check" ]; then
+      if txt_visible "$name" "$value"; then status="OK"; else status="NOT FOUND"; fi
+    elif [ "$method" = cpanel ]; then status="added via cPanel"
+    else status="ADD MANUALLY"; fi
+    rows+=("$n|$name|TXT|60|$value|$status")
   done <"$f"
   out ""; table "${rows[@]}"; out ""
+}
+
+all_visible() {
+  local f="$1" name value method
+  while IFS=$'\t' read -r name value method; do
+    txt_visible "$name" "$value" || return 1
+  done <"$f"
+}
+
+# Automatic records: poll until they are published or we time out.
+wait_for_dns() {
+  local f="$1" deadline=$(( $(date +%s) + DNS_TIMEOUT ))
+  info "Waiting for DNS propagation (up to ${DNS_TIMEOUT}s)..."
+  until all_visible "$f"; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      warn "Some records are not visible yet; trying anyway"
+      print_records "$f" check
+      return
+    fi
+    sleep 10
+  done
+  ok "All TXT records are published"
+  sleep 5
+}
+
+# Manual records: wait for DONE, verify, repeat until everything checks out.
+wait_for_done() {
+  local f="$1" ans
+  { : </dev/tty; } 2>/dev/null || die "Manual DNS needs an interactive terminal"
+  while :; do
+    out "Set the records above, then type ${B}DONE${N} (or ${B}ABORT${N} to cancel):"
+    printf '> ' >/dev/tty
+    read -r ans </dev/tty || die "Aborted"
+    ans="$(printf '%s' "$ans" | tr 'a-z' 'A-Z' | tr -d '[:space:]')"
+    case "$ans" in
+      DONE) ;;
+      ABORT|EXIT|QUIT) die "Aborted" ;;
+      *) continue ;;
+    esac
+    info "Checking DNS..."
+    if all_visible "$f"; then
+      print_records "$f" check
+      ok "All TXT records found - continuing"
+      sleep 5
+      return
+    fi
+    print_records "$f" check
+    warn "Some records were not found yet. Check the name/value (DNS can take a few minutes), then type DONE again."
+  done
 }
 
 # ---------------------------------------------------------------- hooks
 # Certbot calls these with CERTBOT_DOMAIN / CERTBOT_VALIDATION set.
 hook_auth() {
-  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" value="$CERTBOT_VALIDATION" zone
-  local f="$STATE_DIR/records" mode
+  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" value="$CERTBOT_VALIDATION"
+  local f="$STATE_DIR/records" mode method=manual
   mode="$(cat "$STATE_DIR/mode" 2>/dev/null || echo auto)"
   mkdir -p "$STATE_DIR"
-  if [ "$mode" = auto ]; then
-    zone="$(cpanel txt-add "$name" "$value")" || die "Could not add TXT record $name"
-  else
-    zone="$(has_uapi && cpanel zone "$name" 2>/dev/null || echo "${CERTBOT_DOMAIN#\*.}")"
+  # Use cPanel when it hosts the zone; otherwise fall back to manual.
+  if [ "$mode" = auto ] && cpanel txt-add "$name" "$value" >/dev/null 2>&1; then
+    method=cpanel
   fi
-  printf '%s\t%s\t%s\n' "$name" "$value" "$zone" >>"$f"
+  printf '%s\t%s\t%s\n' "$name" "$value" "$method" >>"$f"
 
   # Certbot runs the hook once per challenge; act once all are queued.
   [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ] || return 0
-  if [ "$mode" = auto ]; then
-    info "DNS records added to cPanel:"
-    print_records "$f" "added"
-  else
+  if grep -q $'\tmanual$' "$f"; then
     info "Add these DNS records at your DNS provider:"
-    print_records "$f" "waiting"
-    if { : </dev/tty; } 2>/dev/null; then
-      out "Press ${B}Enter${N} once the records are saved..."
-      read -r _ </dev/tty
-    else
-      die "--manual needs an interactive terminal"
-    fi
+    print_records "$f"
+    wait_for_done "$f"
+  else
+    info "DNS records added to cPanel:"
+    print_records "$f"
+    wait_for_dns "$f"
   fi
-  wait_for_dns "$f"
 }
 
 hook_cleanup() {
-  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}"
-  local mode
-  mode="$(cat "$STATE_DIR/mode" 2>/dev/null || echo auto)"
-  if [ "$mode" = auto ]; then
-    cpanel txt-del "$name" "$CERTBOT_VALIDATION" || warn "Could not remove TXT record $name"
+  local name="_acme-challenge.${CERTBOT_DOMAIN#\*.}" f="$STATE_DIR/records"
+  if grep -qF "$name"$'\t'"$CERTBOT_VALIDATION"$'\tcpanel' "$f" 2>/dev/null; then
+    cpanel txt-del "$name" "$CERTBOT_VALIDATION" >/dev/null 2>&1 || warn "Could not remove TXT record $name"
   fi
   if [ "${CERTBOT_REMAINING_CHALLENGES:-0}" = 0 ]; then
-    rm -f "$STATE_DIR/records"
-    [ "$mode" = manual ] && out "You can now delete the _acme-challenge TXT records."
+    grep -q $'\tmanual$' "$f" 2>/dev/null && out "You can now delete the _acme-challenge TXT records from your DNS."
+    rm -f "$f"
   fi
   return 0
 }

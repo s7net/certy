@@ -9,6 +9,7 @@ certy -d example.com --wildcard
 - **No root required**: everything is installed into `~/bin` and `~/.certy`.
 - **Bundled certbot**: a standalone certbot binary is built with GitHub Actions and published in Releases (no Python needed).
 - **Always DNS validation (DNS-01)**: TXT records are added and removed automatically through cPanel's `uapi`, and shown in a clean table.
+- **Manual fallback**: if the zone isn't hosted on this cPanel (e.g. Cloudflare), certy prints the records, waits for you to type `DONE`, checks DNS itself and tells you which record is still missing.
 - **Automatic install into cPanel** and **automatic renewal** via cron.
 
 ## Install
@@ -40,7 +41,7 @@ certy -d example.com,www.example.com
 # With an email for expiry notices
 certy -d example.com -e me@example.com
 
-# DNS not hosted on this cPanel (e.g. Cloudflare): print the records and wait
+# Force manual DNS: print the records, wait for DONE, verify, continue
 certy -d example.com --wildcard --manual
 ```
 
@@ -67,7 +68,7 @@ Sample output:
 | `-d, --domain` | Domain to include (repeatable or comma separated) |
 | `-w, --wildcard` | Also include `*.domain` for each domain |
 | `-e, --email` | Let's Encrypt account email (remembered) |
-| `--manual` | Don't touch DNS; only print the records table and wait |
+| `--manual` | Don't touch DNS; print the records, wait for `DONE` and verify |
 | `--no-install` | Don't install the certificate into cPanel |
 | `--staging` | Use the Let's Encrypt staging server |
 | `--force` | Re-issue even if the current certificate is still valid |
